@@ -25,15 +25,18 @@ namespace AminHP.KimodoBridge.Editor
             var w = Wp;
             var g = w.ResolvedGenerator;
             if (g == null) { EditorGUILayout.HelpBox("Needs a KimodoGenerator on the same GameObject.", MessageType.Warning); return; }
-            if (g.Motion == null) { EditorGUILayout.HelpBox("Generate a motion on the Generator first.", MessageType.None); return; }
+            var tgt = g.ResolvedTarget;
+            if (tgt == null || tgt.avatar == null || !tgt.avatar.isHuman)
+            { EditorGUILayout.HelpBox("Assign a Humanoid character on the Generator.", MessageType.Warning); return; }
 
             EditorGUILayout.LabelField("Root path (waypoints)", EditorStyles.boldLabel);
             EditorGUILayout.LabelField(
                 "Add a waypoint, then drag its handle on the ground to route the pelvis through it at that " +
-                "frame. The blue line is the character's current root path.",
+                "frame. The blue line is the character's current root path (after a generate).",
                 EditorStyles.wordWrappedMiniLabel);
-            if (!g.IsPreviewBound)
-                EditorGUILayout.HelpBox("Assign a Humanoid Target and Generate to place and move waypoints.", MessageType.Info);
+            if (g.Motion == null)
+                EditorGUILayout.HelpBox("No motion yet — you can place waypoints now and they'll apply on the first " +
+                    "Generate (placement is approximate until a motion refines the mapping).", MessageType.Info);
 
             // Display settings (editor-only visuals).
             using (new EditorGUILayout.HorizontalScope())
@@ -52,7 +55,7 @@ namespace AminHP.KimodoBridge.Editor
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.LabelField($"Preview frame: {g.CurrentFrame} / {Mathf.Max(0, g.FrameCount - 1)}", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField($"Frame: {g.CurrentFrame} / {Mathf.Max(0, g.AuthoringFrameCount - 1)}", EditorStyles.miniLabel);
                 if (GUILayout.Button($"＋ Add @ {g.CurrentFrame}", GUILayout.Width(120)))
                     AddAtCurrent(w, g);
                 using (new EditorGUI.DisabledScope(w.waypoints.Count == 0))
@@ -72,7 +75,7 @@ namespace AminHP.KimodoBridge.Editor
                     using (new EditorGUILayout.HorizontalScope())
                     {
                         EditorGUI.BeginChangeCheck();
-                        int frame = Mathf.Clamp(EditorGUILayout.IntField("Frame", wp.frame), 0, Mathf.Max(0, g.FrameCount - 1));
+                        int frame = Mathf.Clamp(EditorGUILayout.IntField("Frame", wp.frame), 0, Mathf.Max(0, g.AuthoringFrameCount - 1));
                         if (EditorGUI.EndChangeCheck()) { Undo.RecordObject(w, "Edit waypoint frame"); wp.frame = frame; }
 
                         if (GUILayout.Button("Go", GUILayout.Width(34)))
@@ -127,27 +130,23 @@ namespace AminHP.KimodoBridge.Editor
         {
             var w = Wp;
             var g = w.ResolvedGenerator;
-            if (g == null || g.Motion == null) return;
-            if (!g.IsPreviewBound)
-            {
-                Handles.BeginGUI();
-                GUILayout.BeginArea(new Rect(10, 10, 340, 40));
-                EditorGUILayout.HelpBox("Kimodo waypoints: assign a Humanoid Target and Generate to see the root path and place waypoints.", MessageType.Info);
-                GUILayout.EndArea();
-                Handles.EndGUI();
-                return;
-            }
+            if (g == null || g.ResolvedTarget == null) return;
 
-            RefreshPathIfStale(w, g);
-
-            // Current pelvis route, projected onto the display ground.
-            if (_pathWorld != null && _pathWorld.Length > 1)
+            // The pelvis route is only available once a motion has been generated; the waypoint handles
+            // themselves are world positions and can be placed before that.
+            bool hasMotion = g.Motion != null && g.IsPreviewBound;
+            if (hasMotion)
             {
-                var ground = new Vector3[_pathWorld.Length];
-                for (int f = 0; f < _pathWorld.Length; f++) ground[f] = w.OnGround(_pathWorld[f]);
-                Handles.color = PathColor;
-                Handles.DrawAAPolyLine(4f, ground);
+                RefreshPathIfStale(w, g);
+                if (_pathWorld != null && _pathWorld.Length > 1)
+                {
+                    var ground = new Vector3[_pathWorld.Length];
+                    for (int f = 0; f < _pathWorld.Length; f++) ground[f] = w.OnGround(_pathWorld[f]);
+                    Handles.color = PathColor;
+                    Handles.DrawAAPolyLine(4f, ground);
+                }
             }
+            else _pathWorld = null;
 
             // Authored pathway: connect waypoints in frame order (the route the user is drawing).
             DrawAuthoredPathway(w);
@@ -170,7 +169,6 @@ namespace AminHP.KimodoBridge.Editor
                     : HeadingAt(wp.frame);
                 dir.y = 0f;
                 dir = dir.sqrMagnitude < 1e-6f ? Vector3.forward : dir.normalized;
-                float angleDeg = Vector3.SignedAngle(Vector3.forward, dir, Vector3.up);
 
                 Handles.color = wp.constrainFacing ? WpColor : new Color(WpColor.r, WpColor.g, WpColor.b, 0.5f);
                 Vector3 tip = groundPos + dir * (w.markerRadius * 1.8f);
@@ -191,10 +189,6 @@ namespace AminHP.KimodoBridge.Editor
                         EditorUtility.SetDirty(w);
                     }
                 }
-
-                string tag = wp.constrainFacing ? "" : " (auto)";
-                Handles.Label(groundPos + Vector3.up * size * 0.32f,
-                    $"WP · f{wp.frame}   {angleDeg:0}°{tag}   r={w.markerRadius:0.##}m", EditorStyles.whiteMiniLabel);
 
                 // If the waypoint was lifted off the ground, show a drop line + its sphere.
                 if (Mathf.Abs(wp.world.y - w.groundY) > 1e-3f)

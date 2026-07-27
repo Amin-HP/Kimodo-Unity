@@ -63,10 +63,22 @@ namespace AminHP.KimodoBridge
         {
             var m = new Mapping { charRot = Quaternion.identity, k = 1f, valid = false };
             var g = ResolvedGenerator;
-            if (g == null || g.Motion == null || !g.IsPreviewBound) return m;
+            if (g == null) return m;
             var tgt = g.ResolvedTarget;
             var hips = tgt != null ? tgt.GetBoneTransform(HumanBodyBones.Hips) : null;
             if (hips == null) return m;
+
+            // No motion yet: estimate the mapping from the character's current (bind) pose. XZ is exact
+            // relative to the character; scale/height are approximate until a real motion refines them.
+            if (g.Motion == null || !g.IsPreviewBound)
+            {
+                m.charRot = tgt.transform.rotation;
+                m.worldHips0 = hips.position;
+                m.k = tgt.humanScale > 1e-3f ? tgt.humanScale : 1f;
+                m.kimodoRoot0 = new Vector3(0f, hips.position.y / m.k, 0f);
+                m.valid = true;
+                return m;
+            }
 
             var motion = g.Motion;
             var clip = motion.clips[Mathf.Clamp(g.clipIndex, 0, motion.clips.Count - 1)];
@@ -151,10 +163,10 @@ namespace AminHP.KimodoBridge
         public List<KimodoConstraint> BuildRootConstraints()
         {
             var g = ResolvedGenerator;
-            if (g == null || g.Motion == null || waypoints.Count == 0) return null;
-            var m = ComputeMapping();
+            if (g == null || waypoints.Count == 0) return null;
+            var m = ComputeMapping();          // estimated from the bind pose before the first generate
             if (!m.valid) return null;
-            int fc = g.Motion.frameCount;
+            int fc = g.AuthoringFrameCount;     // real frame count, or estimate from duration pre-generation
 
             var posF = new List<int>(); var posP = new List<float>();
             var facF = new List<int>(); var facP = new List<float>(); var facH = new List<float>();

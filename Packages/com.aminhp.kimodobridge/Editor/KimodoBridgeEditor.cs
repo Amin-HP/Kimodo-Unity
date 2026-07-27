@@ -28,9 +28,15 @@ namespace AminHP.KimodoBridge.Editor
                     b.serverUrl = url;
                 }
                 if (GUILayout.Button("Connect", GUILayout.Width(80)))
-                    b.Connect(Repaint);
+                { KimodoBridgeAutoConnect.Wanted = true; b.Connect(Repaint); }
+                using (new EditorGUI.DisabledScope(b.Connection != KimodoBridge.ConnectionState.Online))
+                    if (GUILayout.Button("Disconnect", GUILayout.Width(90)))
+                    { KimodoBridgeAutoConnect.Wanted = false; b.Disconnect(); Repaint(); }
             }
 
+            EditorGUILayout.LabelField(
+                "Stays connected across Play-mode / recompiles (auto-reconnect). Disconnect to stop.",
+                EditorStyles.wordWrappedMiniLabel);
             DrawStatusDot(ConnColor(b.Connection), $"● {b.Connection}");
             EditorGUILayout.LabelField(b.StatusMessage, EditorStyles.wordWrappedMiniLabel);
 

@@ -558,6 +558,32 @@ def models() -> dict:
     return {"models": [_model_summary(info) for info in MODEL_INFOS if info.family == "Kimodo"]}
 
 
+@app.get("/skeleton")
+def skeleton(model: str = DEFAULT_MODEL) -> dict:
+    """Return the model's rest skeleton (bones only, no motion) so the Unity client can author
+    constraints and draw gizmos BEFORE the first /generate. Loads/caches the model if needed."""
+    with _MODEL_LOCK:
+        try:
+            m, resolved = _get_or_load_model(model)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Failed to load model '{model}': {exc}") from exc
+        skel = _export_skeleton(m)
+        bones = _skeleton_bones(skel)
+    info = get_model_info(resolved)
+    return {
+        "model": resolved,
+        "displayName": info.display_name if info else resolved,
+        "skeletonName": skel.name,
+        "coordSystem": "kimodo_rh_yup_zfwd_meters",
+        "quatOrder": "wxyz",
+        "fps": float(m.fps),
+        "frameCount": 0,
+        "jointCount": int(skel.nbjoints),
+        "rootIndex": int(skel.root_idx),
+        "bones": bones,
+    }
+
+
 @app.post("/load_model")
 def load(req: LoadModelRequest) -> dict:
     with _MODEL_LOCK:

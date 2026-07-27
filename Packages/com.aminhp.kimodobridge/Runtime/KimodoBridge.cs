@@ -28,6 +28,7 @@ namespace AminHP.KimodoBridge
         [NonSerialized] public KimodoClient Client;
         [NonSerialized] public KimodoHealth Health;
         [NonSerialized] public KimodoModelList Models;
+        [NonSerialized] public KimodoMotion Skeleton;   // bones-only, fetched on connect (pre-generation authoring)
         [NonSerialized] public ConnectionState Connection = ConnectionState.Unknown;
         [NonSerialized] public string StatusMessage = "Not connected.";
         [NonSerialized] public ModelLoadState ModelState = ModelLoadState.None;
@@ -107,9 +108,33 @@ namespace AminHP.KimodoBridge
                     if (Models != null)
                         foreach (var m in Models.models)
                             if (m.shortKey == key) m.loaded = true;
+                    FetchSkeleton(onChanged);   // pull the rest skeleton so constraints can be authored pre-generation
                 }
                 onChanged?.Invoke();
             });
+        }
+
+        /// <summary>Fetch the current model's rest skeleton (bones only) so waypoints/pose constraints can be
+        /// authored and drawn before the first /generate. Cheap once the model is loaded.</summary>
+        public void FetchSkeleton(Action onChanged = null)
+        {
+            if (Connection != ConnectionState.Online || string.IsNullOrEmpty(model)) return;
+            string key = model;
+            GetClient().GetSkeleton(key, (ok, skel, err) =>
+            {
+                if (!this) return;
+                if (key != model) return; // model changed meanwhile
+                if (ok && skel != null && skel.bones != null && skel.bones.Count > 0) Skeleton = skel;
+                onChanged?.Invoke();
+            });
+        }
+
+        /// <summary>Forget the (in-memory) connection so auto-reconnect stops. The server keeps the model loaded.</summary>
+        public void Disconnect()
+        {
+            Connection = ConnectionState.Offline;
+            ModelState = ModelLoadState.None;
+            StatusMessage = "Disconnected (server still has the model loaded).";
         }
     }
 }

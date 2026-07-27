@@ -41,6 +41,15 @@ namespace AminHP.KimodoBridge
             return req;
         }
 
+        // --- GET /skeleton --- (bones only, so the client can author constraints before the first generate)
+        public UnityWebRequest GetSkeleton(string model, Action<bool, KimodoMotion, string> onDone)
+        {
+            var req = UnityWebRequest.Get(BaseUrl + "/skeleton?model=" + UnityWebRequest.EscapeURL(model));
+            req.timeout = 0; // may trigger a model load the first time
+            SendJson(req, onDone);
+            return req;
+        }
+
         // --- POST /load_model ---
         [Serializable]
         private class LoadReq { public string model; }

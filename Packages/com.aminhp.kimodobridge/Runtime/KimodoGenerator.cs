@@ -62,6 +62,35 @@ namespace AminHP.KimodoBridge
 
         public int FrameCount => Motion != null ? Motion.frameCount : 0;
         public float Fps => Motion != null ? Motion.fps : 30f;
+
+        /// <summary>Bones-only skeleton fetched by the bridge on connect (for pre-generation authoring).</summary>
+        public KimodoMotion Skeleton => ResolvedBridge != null ? ResolvedBridge.Skeleton : null;
+
+        /// <summary>The real motion if generated, else the connected bridge's rest skeleton — whichever can
+        /// supply the bone list / joint count for drawing + building constraints.</summary>
+        public KimodoMotion PoseSkeleton => Motion != null ? Motion : Skeleton;
+
+        /// <summary>True when there's something (motion or fetched skeleton) to author constraints against.</summary>
+        public bool HasAuthoringSkeleton =>
+            PoseSkeleton != null && PoseSkeleton.bones != null && PoseSkeleton.bones.Count > 0;
+
+        /// <summary>Estimated frame count from the requested duration (× fps) when there's no motion yet.</summary>
+        public int EstimatedFrameCount
+        {
+            get
+            {
+                float fps = Skeleton != null && Skeleton.fps > 0f ? Skeleton.fps : 30f;
+                float secs = 0f;
+                foreach (var part in (duration ?? "").Split(' '))
+                    if (float.TryParse(part, System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out var s)) secs += s;
+                if (secs <= 0f) secs = 4f;
+                return Mathf.Max(2, Mathf.RoundToInt(secs * fps));
+            }
+        }
+
+        /// <summary>Frame count to author against: the real motion's, or the estimate before first generate.</summary>
+        public int AuthoringFrameCount => Motion != null ? Motion.frameCount : EstimatedFrameCount;
         public float Duration => Preview != null ? Preview.Duration : (FrameCount / Mathf.Max(1f, Fps));
 
         /// <summary>Preview frame currently under the playback head.</summary>

@@ -27,10 +27,22 @@ namespace AminHP.KimodoBridge
         public static Map Compute(KimodoGenerator g)
         {
             var m = new Map { charRot = Quaternion.identity, k = 1f, valid = false };
-            if (g == null || g.Motion == null || !g.IsPreviewBound) return m;
+            if (g == null) return m;
             var tgt = g.ResolvedTarget;
             var hips = tgt != null ? tgt.GetBoneTransform(HumanBodyBones.Hips) : null;
             if (hips == null) return m;
+
+            // No motion yet: estimate from the character's current (bind) pose so pose gizmos can be
+            // authored before the first generate. Approximate scale/height until a real motion refines it.
+            if (g.Motion == null || !g.IsPreviewBound)
+            {
+                m.charRot = tgt.transform.rotation;
+                m.worldHips0 = hips.position;
+                m.k = tgt.humanScale > 1e-3f ? tgt.humanScale : 1f;
+                m.kimodoRoot0 = new Vector3(0f, hips.position.y / m.k, 0f);
+                m.valid = true;
+                return m;
+            }
 
             var clip = g.Motion.clips[Mathf.Clamp(g.clipIndex, 0, g.Motion.clips.Count - 1)];
             m.charRot = tgt.transform.rotation;

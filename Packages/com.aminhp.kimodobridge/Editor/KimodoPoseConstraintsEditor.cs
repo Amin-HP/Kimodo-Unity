@@ -36,16 +36,22 @@ namespace AminHP.KimodoBridge.Editor
             var p = Pc;
             var g = p.ResolvedGenerator;
             if (g == null) { EditorGUILayout.HelpBox("Needs a KimodoGenerator on the same GameObject.", MessageType.Warning); return; }
-            if (g.Motion == null) { EditorGUILayout.HelpBox("Generate a motion on the Generator first.", MessageType.None); return; }
+            if (!g.HasAuthoringSkeleton)
+            {
+                EditorGUILayout.HelpBox(g.ResolvedBridge != null && g.ResolvedBridge.IsOnline
+                    ? "Loading the skeleton…" : "Connect the KimodoBridge (or Generate once) to author poses.",
+                    MessageType.Info);
+                return;
+            }
 
             EditorGUILayout.LabelField("Whole-rig pose keyframes", EditorStyles.boldLabel);
             EditorGUILayout.LabelField(
                 "Each key shows its pose as a skeleton at its frame. Select a key, click a joint and rotate it; " +
-                "drag the pelvis handle to move the whole pose — green/up sets HEIGHT (e.g. onto a box). " +
-                "'Align to frame' resets a key to the motion's pose there.",
+                "drag the pelvis handle to move the whole pose — green/up sets HEIGHT (e.g. onto a box).",
                 EditorStyles.wordWrappedMiniLabel);
-            if (!g.IsPreviewBound)
-                EditorGUILayout.HelpBox("Assign a Humanoid Target and Generate to place the pose skeletons.", MessageType.Info);
+            if (g.Motion == null)
+                EditorGUILayout.HelpBox("No motion yet — poses apply on the first Generate. 'Align to frame' needs a " +
+                    "motion; use 'Generate pose' or Idle to author now (placement is approximate until then).", MessageType.Info);
 
             EditorGUI.BeginChangeCheck();
             bool ghost = EditorGUILayout.ToggleLeft(
@@ -67,14 +73,23 @@ namespace AminHP.KimodoBridge.Editor
                               : "Activate/deactivate joints (click toggles one joint; use All/None/Upper/Lower for bulk)", "Button");
             if (EditorGUI.EndChangeCheck()) { _activateMode = act; SceneView.RepaintAll(); }
 
+            // Pose-from-prompt settings (shared; apply to the prompt-only mode. Each key toggles "WP".)
             using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.LabelField($"Preview frame: {g.CurrentFrame} / {Mathf.Max(0, g.FrameCount - 1)}", EditorStyles.miniLabel);
+                EditorGUI.BeginChangeCheck();
+                float secs = EditorGUILayout.Slider(new GUIContent("Pose clip (s)", "Length of the throwaway clip used to sample a pose from a prompt."), p.poseGenSeconds, 0.3f, 4f);
+                float at = EditorGUILayout.Slider(new GUIContent("Sample at", "Which frame of that clip to take: 0 = first, 1 = last."), p.poseSampleAt, 0f, 1f);
+                if (EditorGUI.EndChangeCheck()) { Undo.RecordObject(p, "Edit pose-gen settings"); p.poseGenSeconds = secs; p.poseSampleAt = at; }
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField($"Frame: {g.CurrentFrame} / {Mathf.Max(0, g.AuthoringFrameCount - 1)}", EditorStyles.miniLabel);
                 if (GUILayout.Button($"＋ Add @ {g.CurrentFrame}", GUILayout.Width(120)))
                 {
                     Undo.RecordObject(p, "Add pose key");
                     var nk = new KimodoPoseConstraints.Key { frame = g.CurrentFrame, show = true };
-                    InitKeyFromMotion(nk, g);
+                    SeedKey(nk, g);
                     p.keys.Add(nk);
                     _selKey = p.keys.Count - 1; _selJoint = -1;
                 }
@@ -94,33 +109,49 @@ namespace AminHP.KimodoBridge.Editor
                     {
                         EditorGUI.BeginChangeCheck();
                         bool show = GUILayout.Toggle(k.show, "Show", "Button", GUILayout.Width(52));
-                        int frame = Mathf.Clamp(EditorGUILayout.IntField("Frame", k.frame), 0, Mathf.Max(0, g.FrameCount - 1));
+                        int frame = Mathf.Clamp(EditorGUILayout.IntField("Frame", k.frame), 0, Mathf.Max(0, g.AuthoringFrameCount - 1));
                         if (EditorGUI.EndChangeCheck()) { Undo.RecordObject(p, "Edit pose key"); k.show = show; k.frame = frame; }
 
                         if (GUILayout.Button(sel ? "◉" : "○", GUILayout.Width(26))) { _selKey = sel ? -1 : i; _selJoint = -1; SceneView.RepaintAll(); }
                         if (GUILayout.Button("Go", GUILayout.Width(30)))
                         { g.Playing = false; g.SampleTime(g.Fps > 0f ? k.frame / g.Fps : 0f); SceneView.RepaintAll(); }
+                        if (GUILayout.Button(new GUIContent("⋮", "More: align to frame, idle, active region…"), GUILayout.Width(24)))
+                            ShowKeyMenu(p, g, k);
                         if (GUILayout.Button("✕", GUILayout.Width(22))) removeAt = i;
-                    }
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        if (GUILayout.Button("Align to frame")) { InitKeyFromMotion(k, g); SceneView.RepaintAll(); }
-                        EditorGUILayout.LabelField(sel && _selJoint >= 0 ? $"Selected joint: {g.Motion.bones[_selJoint].name}" : (sel ? "Click a joint in the Scene." : ""), EditorStyles.miniLabel);
                     }
                     if (sel)
                     {
+                        EditorGUILayout.LabelField(
+                            (_selJoint >= 0 ? $"Joint: {g.PoseSkeleton.bones[_selJoint].name}" : "Click a joint in the Scene")
+                            + "   ·   " + (KimodoPoseConstraints.HasInactive(k) ? $"{CountActiveBody(k, g.PoseSkeleton)}/{BodyJoints.Length} joints" : "whole body"),
+                            EditorStyles.miniLabel);
+
+                        // Generate this key's pose from a text prompt (Kimodo makes a short clip and
+                        // samples one frame). Only the joint rotations are replaced; frame + root stay.
                         using (new EditorGUILayout.HorizontalScope())
                         {
-                            EditorGUILayout.LabelField("Active:", GUILayout.Width(46));
-                            if (GUILayout.Button("All")) { SetRegion(k, g, Region.All); }
-                            if (GUILayout.Button("None")) { SetRegion(k, g, Region.None); }
-                            if (GUILayout.Button("Upper")) { SetRegion(k, g, Region.Upper); }
-                            if (GUILayout.Button("Lower")) { SetRegion(k, g, Region.Lower); }
-                            int active = CountActiveBody(k, g.Motion);
-                            EditorGUILayout.LabelField(KimodoPoseConstraints.HasInactive(k)
-                                ? $"{active}/{BodyJoints.Length} joints constrained" : "whole body",
-                                EditorStyles.miniLabel);
+                            EditorGUI.BeginChangeCheck();
+                            string prompt = EditorGUILayout.TextField(new GUIContent("Prompt", "Describe the pose, e.g. 'raise both hands'."), k.prompt);
+                            bool uwp = GUILayout.Toggle(k.useWaypoints, new GUIContent("WP",
+                                "Use the waypoint path for THIS key (in-context, slower). Off = prompt-only, grafted " +
+                                "onto this frame's facing + height so the direction/Y are right."), "Button", GUILayout.Width(34));
+                            if (EditorGUI.EndChangeCheck()) { Undo.RecordObject(p, "Edit pose prompt"); k.prompt = prompt; k.useWaypoints = uwp; }
+
+                            using (new EditorGUI.DisabledScope(p.GeneratingPose || g.ResolvedBridge == null || !g.ResolvedBridge.IsOnline || string.IsNullOrWhiteSpace(k.prompt)))
+                                if (GUILayout.Button(p.GeneratingPose ? "…" : "Generate pose", GUILayout.Width(110)))
+                                {
+                                    Undo.RecordObject(p, "Generate pose from prompt");
+                                    var key = k;
+                                    p.GeneratePoseForKey(key, (ok, err) =>
+                                    {
+                                        if (!ok) Debug.LogWarning("[Kimodo] " + err);
+                                        else EditorUtility.SetDirty(p);
+                                        Repaint(); SceneView.RepaintAll();
+                                    });
+                                }
                         }
+                        if (p.GeneratingPose)
+                            EditorGUILayout.LabelField("Generating pose…", EditorStyles.miniLabel);
                     }
                 }
             }
@@ -130,8 +161,35 @@ namespace AminHP.KimodoBridge.Editor
                 EditorGUILayout.LabelField($"{p.keys.Count} whole-rig pose(s) sent on next Generate.", EditorStyles.miniLabel);
         }
 
+        // The ⋮ dropdown for a key: the less-frequent actions (resets + active region presets).
+        private void ShowKeyMenu(KimodoPoseConstraints p, KimodoGenerator g, KimodoPoseConstraints.Key k)
+        {
+            var menu = new GenericMenu();
+            if (g.Motion != null)
+                menu.AddItem(new GUIContent("Align to frame"), false,
+                    () => { InitKeyFromMotion(k, g); SceneView.RepaintAll(); Repaint(); });
+            else
+                menu.AddDisabledItem(new GUIContent("Align to frame (needs a motion)"));
+            menu.AddItem(new GUIContent("Idle (rest pose)"), false,
+                () => { Undo.RecordObject(p, "Reset pose to idle"); p.SetIdlePose(k); EditorUtility.SetDirty(p); SceneView.RepaintAll(); Repaint(); });
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("Active/Whole body"), !KimodoPoseConstraints.HasInactive(k), () => { SetRegion(k, g, Region.All); Repaint(); });
+            menu.AddItem(new GUIContent("Active/None"), false, () => { SetRegion(k, g, Region.None); Repaint(); });
+            menu.AddItem(new GUIContent("Active/Upper body"), false, () => { SetRegion(k, g, Region.Upper); Repaint(); });
+            menu.AddItem(new GUIContent("Active/Lower body"), false, () => { SetRegion(k, g, Region.Lower); Repaint(); });
+            menu.ShowAsContext();
+        }
+
+        // Seed a new/blank key: from the motion's pose at its frame if there is one, else a neutral idle.
+        private void SeedKey(KimodoPoseConstraints.Key k, KimodoGenerator g)
+        {
+            if (g.Motion != null) InitKeyFromMotion(k, g);
+            else Pc.SetIdlePose(k);
+        }
+
         private void InitKeyFromMotion(KimodoPoseConstraints.Key k, KimodoGenerator g)
         {
+            if (g.Motion == null) { Pc.SetIdlePose(k); return; }
             var motion = g.Motion; int J = motion.jointCount;
             var clip = motion.clips[Mathf.Clamp(g.clipIndex, 0, motion.clips.Count - 1)];
             int f = Mathf.Clamp(k.frame, 0, motion.frameCount - 1);
@@ -147,7 +205,7 @@ namespace AminHP.KimodoBridge.Editor
 
         private void SetRegion(KimodoPoseConstraints.Key k, KimodoGenerator g, Region r)
         {
-            var motion = g.Motion; int J = motion.jointCount;
+            var motion = g.PoseSkeleton; int J = motion.jointCount;
             Undo.RecordObject(Pc, "Set active region");
             if (r == Region.All) { k.jointActive = null; EditorUtility.SetDirty(Pc); SceneView.RepaintAll(); return; }
             var active = new bool[J];
@@ -218,7 +276,7 @@ namespace AminHP.KimodoBridge.Editor
         // ---------------------------------------------------------------
         private void EnsureMapAndBodyIdx(KimodoGenerator g)
         {
-            var motion = g.Motion;
+            var motion = g.PoseSkeleton;
             if (_bodyIdx == null || _bodyMotionHash != motion.GetHashCode())
             {
                 _bodyMotionHash = motion.GetHashCode();
@@ -233,19 +291,19 @@ namespace AminHP.KimodoBridge.Editor
         private void OnSceneGUI()
         {
             var p = Pc; var g = p.ResolvedGenerator;
-            if (g == null || g.Motion == null || !g.IsPreviewBound) return;
+            if (g == null || !g.HasAuthoringSkeleton) return;
+            var motion = g.PoseSkeleton;   // real motion, or the rest skeleton before the first generate
 
             // Make sure every shown key has an authored pose (so both the skeleton and the ghost
             // mesh have something to draw), then update the transparent ghost copies.
             foreach (var k in p.keys)
-                if (k.show && (!k.hasPose || k.localQuats == null || k.localQuats.Length != g.Motion.jointCount * 4))
-                    InitKeyFromMotion(k, g);
+                if (k.show && (!k.hasPose || k.localQuats == null || k.localQuats.Length != motion.jointCount * 4))
+                    SeedKey(k, g);
             if (p.showGhostMesh) { (_ghosts ??= new KimodoPoseGhosts()).Sync(p, g); }
             else if (_ghosts != null) { _ghosts.Dispose(); _ghosts = null; }
 
             EnsureMapAndBodyIdx(g);
             if (!_map.valid) return;
-            var motion = g.Motion;
 
             var prevZ = Handles.zTest;
             Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;

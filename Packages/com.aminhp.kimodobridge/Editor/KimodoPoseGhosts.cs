@@ -69,19 +69,20 @@ namespace AminHP.KimodoBridge.Editor
         {
             if (!_swept) { SweepOrphans(); _swept = true; }
             var tgt = g != null ? g.ResolvedTarget : null;
-            if (pc == null || g == null || g.Motion == null || tgt == null || !pc.showGhostMesh || Mat == null)
+            var sk = g != null ? g.PoseSkeleton : null;   // real motion, or the rest skeleton pre-generation
+            if (pc == null || g == null || sk == null || tgt == null || !pc.showGhostMesh || Mat == null)
             {
                 DestroyAll();
                 return;
             }
 
             var srcGo = tgt.gameObject;
-            if (_sourceRef != srcGo || _motionRef != g.Motion) { DestroyAll(); _sourceRef = srcGo; _motionRef = g.Motion; }
+            if (_sourceRef != srcGo || _motionRef != sk) { DestroyAll(); _sourceRef = srcGo; _motionRef = sk; }
 
             // White ghost, opacity from the slider.
             Mat.SetColor("_BaseColor", new Color(1f, 1f, 1f, Mathf.Clamp01(pc.ghostOpacity)));
 
-            int need = g.Motion.jointCount * 4;
+            int need = sk.jointCount * 4;
 
             // Drop ghosts whose key was removed or hidden.
             var stale = new List<KimodoPoseConstraints.Key>();
@@ -96,7 +97,7 @@ namespace AminHP.KimodoBridge.Editor
                 if (!k.show || k.localQuats == null || k.localQuats.Length != need) continue;
                 if (!_ghosts.TryGetValue(k, out var ghost) || ghost.go == null)
                 {
-                    ghost = Create(srcGo, g.Motion);
+                    ghost = Create(srcGo, sk);
                     if (ghost == null) continue;
                     _ghosts[k] = ghost;
                 }
@@ -108,7 +109,7 @@ namespace AminHP.KimodoBridge.Editor
 
                 // Refresh the fade mask only when the activation changed.
                 int sig = ActiveSig(k);
-                if (ghost.activeSig != sig) { ApplyActivation(ghost, k, g.Motion); ghost.activeSig = sig; }
+                if (ghost.activeSig != sig) { ApplyActivation(ghost, k, sk); ghost.activeSig = sig; }
             }
         }
 

@@ -5,7 +5,10 @@
 > `C:\Users\mahag\.claude\projects\h--kimodo\memory\` (`kimodo-unity-bridge.md` — detailed running log,
 > `kimodo-setup.md` — how Kimodo is installed).
 
-Last updated: 2026-07-23. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
+Last updated: 2026-07-27. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
+Published: **https://github.com/Amin-HP/Kimodo-Unity** (branch `main`, currently private). The repo bundles a
+copy of the Python server under `Server/` — **re-sync it from the live `H:\kimodo\kimodo\kimodo_bridge\server.py`
+before each push** (see the `kimodo-github-repo` memory).
 
 ---
 
@@ -34,7 +37,8 @@ pose) → bake. All confirmed by the user in-editor.
      wires the bridge.
    - On KimodoBridge: **Connect** (preloads the model). On KimodoGenerator: prompt → **Generate** →
      preview (play/scrub) → **Bake to AnimationClip**.
-   - A legacy all-in-one window still exists: `Window ▸ Kimodo ▸ Bridge` (older, superseded by components).
+   - Add constraint components as needed (`GameObject ▸ Kimodo` or Add Component): **KimodoWaypoints**,
+     **KimodoEffectors**, **KimodoPoseConstraints** — each draws Scene gizmos and is gathered on Generate.
 
 ---
 
@@ -54,9 +58,11 @@ Unity Editor (C#) ──HTTP/JSON──► Bridge server (FastAPI) ──► Kim
 ## 4. File map
 
 ### Python bridge server — `H:\kimodo\kimodo\kimodo_bridge\`
-- `server.py` — FastAPI app. `GET /health`, `GET /models`, `POST /load_model`, `POST /generate`.
-  `_get_or_load_model` caches by resolved short-key (MUST reuse — reload re-loads the ~8B text encoder).
+- `server.py` — FastAPI app. `GET /health`, `GET /models`, `GET /skeleton`, `POST /load_model`, `POST /generate`.
+  `GET /skeleton?model=` returns the rest bone list (no motion) so the client can author + draw constraints BEFORE
+  the first generate. `_get_or_load_model` caches by resolved short-key (MUST reuse — reload re-loads the ~8B encoder).
   Constraint machinery (see §7). Launcher `..\run_bridge.ps1`. `__main__.py`, `__init__.py`.
+  **This is the live server.** A snapshot lives in the GitHub repo under `Server/` — keep it in sync (see header).
 
 ### Unity package — `H:\kimodo\Kimodo Unity\Packages\com.aminhp.kimodobridge\`
 Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`**. Asmdefs
@@ -88,7 +94,15 @@ Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`*
   `KimodoPoseConstraintsEditor.cs` — custom inspectors + Scene gizmos.
 - `KimodoPoseGhosts.cs` — manages the transparent ghost-mesh clones for the pose-constraint editor (see §7).
 - `KimodoMenu.cs` — the `GameObject ▸ Kimodo ▸ …` menu items.
-- `KimodoBridgeWindow.cs` — **legacy** all-in-one window (still compiles).
+  (The legacy all-in-one `KimodoBridgeWindow.cs` was **removed** in the v0.1.0 cleanup — component workflow only.)
+
+### Example (outside the package) — `H:\kimodo\Kimodo Unity\Assets\`
+- `KimodoCircleWaypoints.cs` — a user-side script (namespace-less, `using AminHP.KimodoBridge`) showing how to drive
+  the plugin from your own code: builds a **circular loop** of waypoints (center/radius/resolution, closeLoop makes
+  first==last exactly, `facingOffsetDeg` e.g. ±90 to look at the centre, `startAtCharacter`), can **duplicate the
+  first pose key** onto every waypoint frame (root moved onto the circle), and `BuildAndGenerate()` runs the two-pass
+  (baseline generate → build → generate) since waypoints need an existing motion for the mapping. Context-menu:
+  Build Circle / Duplicate Pose To Waypoints / Build Circle + Generate.
 
 ---
 
@@ -156,7 +170,8 @@ Server: `KimodoGenerator.Generate()` gathers constraints from `KimodoEffectors` 
 
 Unity components:
 - **KimodoWaypoints** (root path) — place ground waypoints; a **rotatable facing arrow** per waypoint (sent as
-  `global_root_heading`). Editor draws the pelvis path + waypoint discs (ground Y, radius, angle). **Works well** —
+  `global_root_heading`). Editor draws the pelvis path + waypoint discs + facing arrows (no text labels; `markerRadius`
+  is display-only and does NOT affect the constraint — only `world` position + optional facing do). **Works well** —
   this is the reference for "the affine mapping is correct."
 - **KimodoEffectors** (hand/foot) — world targets (position + optional rotation) per frame. **Full-body IK**: takes
   the current pose, two-bone-IKs the leg/arm to reach the target (steps the body/root when out of reach), sends the
@@ -170,6 +185,23 @@ Unity components:
   this is how you lift a pose onto a box; the root joint's rotation gizmo is suppressed to avoid overlap. "Align to
   frame" reseeds from the motion. Sent as `fullbody` (constrains all joint positions + `root_y_pos`, so height is
   enforced — unlike waypoints/root2d which are ground X/Z only).
+  - **Generate pose from prompt** (2026-07-27): instead of hand-rotating joints, a key can carry a text `prompt`;
+    `KimodoPoseConstraints.GeneratePoseForKey(key, cb)` calls `/generate` for a short throwaway clip (`poseGenSeconds`,
+    default 1.5s), samples one frame (`poseSampleAt` 0..1, default 1=last), and writes only that frame's `localQuats`
+    into the key — the key's frame + root (its waypoint/position) are untouched. No model/server change (Kimodo has no
+    literal text→pose; this is text→short-motion then sample a frame). Editor: per-key Prompt field + "Generate pose"
+    button; `GeneratingPose` flag for UI. Local rotations are parent-relative so the sampled pose transfers regardless
+    of which way the throwaway clip faced. **Per-key waypoint mode** (`Key.useWaypoints`, "WP" toggle in the prompt
+    row; default off): runs the FULL timeline (`g.duration`) with the sibling `KimodoWaypoints` path applied
+    (`GatherWaypointConstraints`) and samples the key's own frame, copying that frame's localQuats AND root (right
+    place + Y). **Prompt-only mode** (WP off, the good default): short clip sampled by `poseSampleAt`, then
+    `GraftOntoMainFrame` replaces the generated Hips (root) rotation + root position with the MAIN motion's values at
+    key.frame — so the pose faces the walk direction and sits at the correct pelvis height (fixes the "wrong
+    direction / wrong Y" that raw prompt-only had; full-generate mode ignored the prompt). Only waypoints, per user
+    request — not effectors/other pose keys. **Idle** (`SetIdlePose`) = reset to the neutral
+    rest pose (identity local rotations) keeping frame + root; **Align to frame** = pin the motion's natural pose there.
+    Per-key UI: the resets + active-region presets (All/None/Upper/Lower) live in a **⋮ dropdown** (`ShowKeyMenu`,
+    GenericMenu) on the key's header row, not as separate buttons.
   - **Per-key joint activation** (2026-07-27): a key can DEACTIVATE joints (per key) so only the active part is
     constrained + shown. Editor: "Activate joints" mode — clicking a dot toggles **exactly that one joint**
     (independent, so you can deactivate all except a hand); per-key quick buttons **All / None / Upper / Lower** for
@@ -203,6 +235,25 @@ Unity components:
 
 ---
 
+## 7b. Connection + pre-generation authoring (2026-07-27)
+
+- **Auto-reconnect** — the bridge "connection" is stateless HTTP (Connect = health-check + preload; the server keeps
+  the model loaded). The in-memory `Connection` flag is `[NonSerialized]` and wiped on every domain reload (Play-mode
+  enter/exit, recompile), which is why you used to re-press Connect. `Editor/KimodoBridgeAutoConnect.cs`
+  (`[InitializeOnLoad]` → `delayCall` after each reload) silently reconnects any `KimodoBridge`, gated on a
+  `SessionState` flag set when you Connect and cleared by the new **Disconnect** button (`KimodoBridge.Disconnect`).
+  A window would NOT have fixed this — same reload wipes window fields too.
+- **Author waypoints/poses before the first generate** — the gizmos convert via a world↔Kimodo affine measured from a
+  motion, and the pose ghost needs the skeleton — none of which existed pre-generation, hence the old gating. Now: the
+  bridge fetches the rest skeleton on connect (`KimodoBridge.Skeleton` via `GET /skeleton`, exposed as
+  `KimodoGenerator.PoseSkeleton`/`HasAuthoringSkeleton`); `KimodoRootMap.Compute` + `KimodoWaypoints.ComputeMapping`
+  fall back to an **estimated** mapping from the character's bind pose (`worldHips0`=current hips, `k`=`humanScale`,
+  `kimodoRoot0`≈origin); frame counts come from `KimodoGenerator.AuthoringFrameCount` (duration×fps estimate). The
+  editors + `BuildRootConstraints`/`BuildConstraints`/`KimodoPoseGhosts` use `PoseSkeleton`/`AuthoringFrameCount`, so
+  you can place waypoints + author poses (Generate-pose / Idle; "Align to frame" needs a real motion) and they apply
+  on the **first** Generate. Placement is **approximate** until a real motion refines the mapping. **Server change
+  (`/skeleton`) → restart the bridge.**
+
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +
@@ -214,14 +265,20 @@ Unity components:
   Mixamo mesh. Fine per the user; could scale/retarget the ghost if desired.
 - **Foot sliding** (treadmill) — no foot-lock yet; `footContacts` are in the payload → pin planted feet in
   retarget/bake. Not started.
-- **Timeline** — a Unity Timeline track to sequence prompt segments + per-frame constraints is the big unstarted
-  feature the user wants eventually.
+- **Timeline** — sequence prompt segments + per-frame constraints, the big feature the user wants next. **Decision
+  made (2026-07-27):** build a **custom dockable Kimodo window** as the sequencer (connection + timeline + Generate),
+  keeping the per-character constraint **components** for the Scene authoring — NOT Unity's native Timeline (its
+  runtime Playables/binding model is a poor fit for an author-then-bake diffusion tool; a custom EditorWindow is the
+  standard Unity pattern here). Maps onto Kimodo's existing multi-prompt (periods + space-separated durations) +
+  frame-indexed constraints (server already `crop_move`s per segment), so it's mostly a Unity authoring layer.
 - **Per-joint constraint intensity (graded weight) is still NOT supported by the model.** `create_conditions` writes
   constrained joints into a **boolean** `motion_mask`; the only strength dial is the global `cfg_weight[1]`
   (`constraintWeight`). Binary joint *selection* now exists (pose-key activation → `_PartialFullBody`, see §7), which
   covers "upper-body only". True graded weights would need the mask → float weight folded into the diffusion guidance
   (model-side change) — not started.
-- **Legacy `KimodoBridgeWindow`** can be removed once the component workflow is fully settled.
+- **Prompt-pose graft is hips-entire** — `GraftOntoMainFrame` keeps the main frame's whole Hips rotation (facing +
+  tilt), so a pose that hinges from the hips loses that pitch. Possible refinement: align only the heading (yaw) and
+  keep the generated pose's own lean.
 - Model switching loads a second model (its own text encoder) — heavy; user stays on SOMA.
 
 ## Reference
