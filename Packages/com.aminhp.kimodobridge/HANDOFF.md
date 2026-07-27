@@ -108,6 +108,7 @@ seed(-1=random), postprocess, include_positions, cfg_weight:[text,constraint], c
 - `type`: `left-hand|right-hand|left-foot|right-foot|fullbody|root2d`.
 - `frameIndices[N]`.
 - pose-based (fullbody, IK'd effectors): `localQuats[N*J*4 wxyz]`, `rootPositions[N*3]`.
+- `activeJoints[]` (fullbody only): active BODY-joint names → server pins only those (partial pose). Omit = all.
 - direct effector target (unused now — see IK below): `effectorPos[N*3]`, `effectorRot[N*4]`, `effectorRootXZ[N*2]`, `constrainRot`.
 - root path: `rootPath2d[N*2 xz]`, optional `rootHeading2d[N*2 cos,sin]`.
 - (legacy pin offsets: `targetOffsets`, `jointNames`.)
@@ -169,6 +170,24 @@ Unity components:
   this is how you lift a pose onto a box; the root joint's rotation gizmo is suppressed to avoid overlap. "Align to
   frame" reseeds from the motion. Sent as `fullbody` (constrains all joint positions + `root_y_pos`, so height is
   enforced — unlike waypoints/root2d which are ground X/Z only).
+  - **Per-key joint activation** (2026-07-27): a key can DEACTIVATE joints (per key) so only the active part is
+    constrained + shown. Editor: "Activate joints" mode — clicking a dot toggles **exactly that one joint**
+    (independent, so you can deactivate all except a hand); per-key quick buttons **All / None / Upper / Lower** for
+    bulk (Upper/Lower still use subtree fill); inactive joints draw dimmed. Stored as `Key.jointActive` (bool[J], null
+    = all). `BuildConstraints` sends `activeJoints` (active BODY-joint names) only when a subset is off; all-active
+    omits it → stock `FullBodyConstraintSet`. Server builds **`_PartialFullBody`** which pins **only those joints'
+    positions** (+ smooth_root/root_y/heading), rest free — real "upper-body only". Names→indices at load (SOMA
+    30/77-safe). **CRITICAL:** `_PartialFullBody` is a **plain class, NOT a `FullBodyConstraintSet` subclass** — because
+    `postprocess.py` hard-rewrites the WHOLE body's rotations for any FullBody/EndEffector constraint (it can't mask
+    per-joint), which was snapping the free joints back (the "still constrains whole body" bug, 2026-07-27). As a plain
+    class postprocess's `isinstance` checks skip it (its `else` is a no-op `NotImplementedError(...)` with no `raise`),
+    so the rest stay free. **`_PartialFullBody` must impute the active joints' ROTATIONS, not just positions**
+    (2026-07-27 fix #2): `FullBodyConstraintSet` conditions positions only ("global rotations are not used here") and
+    gets its actual pose from the postprocess snap — which partial skips — so a positions-only partial did *nothing*
+    (constraint weight didn't help). Fix: `update_constraints` appends BOTH `global_joints_positions` AND
+    `global_joints_rots` (the primary pose channel) for the active joints, + smooth_root/root_y/heading. Same pattern
+    the model itself uses for cross-segment transitions (adds an EndEffectorConstraintSet "to capture hand/feet
+    rotations"). **Server change → restart the bridge** (repo `Server/` copy needs re-syncing before the next release).
   - **Ghost mesh** (added 2026-07-26, `showGhostMesh` toggle on the component; editor-only): for each *shown*
     key it keeps a **transparent clone** of the target character posed at that key via the real retarget path, so
     you see the actual model (skin/mesh renderers), not just the skeleton, as you edit. `Editor/KimodoPoseGhosts.cs`
@@ -176,7 +195,11 @@ Unity components:
     deselect/regeneration; orphan-swept after domain reload). Renders with `Runtime/KimodoGhost.shader`
     (`"Kimodo/GhostMesh"`, URP transparent fresnel). Look is **fixed white ~0.51 alpha** (not user-editable — set in
     `KimodoPoseGhosts`, only an on/off toggle in the inspector). Clones sit exactly over the ghost skeleton because
-    both use the same retarget + `rootMotionScale`.
+    both use the same retarget + `rootMotionScale`. **Transparency slider** (`ghostOpacity`, 0–1, default 0.51) sets
+    the ghost's base alpha. Deactivated joints **fade out**: `KimodoPoseGhosts` instances each clone's skinned mesh
+    and writes a per-vertex mask into vertex-colour alpha = the skin-weighted average of its bones' active flags
+    (bone→HumanBodyBones→SOMA-active), so the boundary blends smoothly; the ghost shader multiplies alpha by it.
+    Recomputed only when the key's activation signature changes.
 
 ---
 
@@ -193,11 +216,11 @@ Unity components:
   retarget/bake. Not started.
 - **Timeline** — a Unity Timeline track to sequence prompt segments + per-frame constraints is the big unstarted
   feature the user wants eventually.
-- **Per-joint constraint intensity is NOT supported by the model.** `create_conditions` writes constrained joints
-  into a **boolean** `motion_mask`; the only strength dial is the single global `cfg_weight[1]` (`constraintWeight`),
-  applied uniformly. "More upper-body, less lower-body" today = **constrain only the joints you want** (partial key
-  vs. full 23-joint fullbody). Graded weights would need changing the mask to a float weight folded into the
-  diffusion guidance (model-side change) — not started.
+- **Per-joint constraint intensity (graded weight) is still NOT supported by the model.** `create_conditions` writes
+  constrained joints into a **boolean** `motion_mask`; the only strength dial is the global `cfg_weight[1]`
+  (`constraintWeight`). Binary joint *selection* now exists (pose-key activation → `_PartialFullBody`, see §7), which
+  covers "upper-body only". True graded weights would need the mask → float weight folded into the diffusion guidance
+  (model-side change) — not started.
 - **Legacy `KimodoBridgeWindow`** can be removed once the component workflow is fully settled.
 - Model switching loads a second model (its own text encoder) — heavy; user stays on SOMA.
 

@@ -58,6 +58,9 @@ namespace AminHP.KimodoBridge
         public float[] localQuats;      // N*J*4, wxyz, Kimodo coords (full-body pose per keyframe)
         public float[] rootPositions;   // N*3, metres, Kimodo coords (pelvis position per keyframe)
         public string[] jointNames;     // only for generic "end-effector"; empty otherwise
+        public string[] activeJoints;   // "fullbody" only: if set, constrain ONLY these joints'
+                                        // positions (a partial pose, e.g. upper body); the rest of
+                                        // the body is left free. Omit/empty => full-body pose.
         public float[] targetOffsets;   // N*3, metres, Kimodo coords: shift of the pinned joint from
                                         // its captured position (0 = pin where it is). Lets the user
                                         // drag the hand/foot to a new target.

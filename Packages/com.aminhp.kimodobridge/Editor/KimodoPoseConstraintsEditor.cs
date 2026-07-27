@@ -15,16 +15,11 @@ namespace AminHP.KimodoBridge.Editor
         private KimodoPoseConstraints Pc => (KimodoPoseConstraints)target;
 
         // Body joints (SOMA names) exposed as draggable dots/lines — fingers etc. keep their pose.
-        private static readonly string[] BodyJoints =
-        {
-            "Hips", "Spine1", "Spine2", "Chest", "Neck1", "Neck2", "Head",
-            "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
-            "RightShoulder", "RightArm", "RightForeArm", "RightHand",
-            "LeftLeg", "LeftShin", "LeftFoot", "LeftToeBase",
-            "RightLeg", "RightShin", "RightFoot", "RightToeBase",
-        };
+        // Shared with the runtime constraint builder so the two never diverge.
+        private static readonly string[] BodyJoints = KimodoPoseConstraints.BodyJointNames;
 
         private int _selKey = -1, _selJoint = -1;
+        private bool _activateMode;           // clicking a joint toggles its active state (subtree)
         private int[] _bodyIdx;               // BodyJoints -> index into the 77 joints
         private KimodoRootMap.Map _map;
         private int _mapSig = int.MinValue, _bodyMotionHash;
@@ -55,13 +50,22 @@ namespace AminHP.KimodoBridge.Editor
             EditorGUI.BeginChangeCheck();
             bool ghost = EditorGUILayout.ToggleLeft(
                 "Show ghost mesh (transparent model at each shown key's pose)", p.showGhostMesh);
+            float op = p.ghostOpacity;
+            if (ghost)
+                op = EditorGUILayout.Slider("Ghost transparency", p.ghostOpacity, 0f, 1f);
             if (EditorGUI.EndChangeCheck())
             {
-                Undo.RecordObject(p, "Toggle ghost mesh");
-                p.showGhostMesh = ghost;
+                Undo.RecordObject(p, "Edit ghost mesh");
+                p.showGhostMesh = ghost; p.ghostOpacity = op;
                 if (!ghost) { _ghosts?.Dispose(); _ghosts = null; }
                 SceneView.RepaintAll();
             }
+
+            EditorGUI.BeginChangeCheck();
+            bool act = GUILayout.Toggle(_activateMode,
+                _activateMode ? "● Activating joints — click a joint to toggle just that joint (green=on, red=off)"
+                              : "Activate/deactivate joints (click toggles one joint; use All/None/Upper/Lower for bulk)", "Button");
+            if (EditorGUI.EndChangeCheck()) { _activateMode = act; SceneView.RepaintAll(); }
 
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -103,6 +107,21 @@ namespace AminHP.KimodoBridge.Editor
                         if (GUILayout.Button("Align to frame")) { InitKeyFromMotion(k, g); SceneView.RepaintAll(); }
                         EditorGUILayout.LabelField(sel && _selJoint >= 0 ? $"Selected joint: {g.Motion.bones[_selJoint].name}" : (sel ? "Click a joint in the Scene." : ""), EditorStyles.miniLabel);
                     }
+                    if (sel)
+                    {
+                        using (new EditorGUILayout.HorizontalScope())
+                        {
+                            EditorGUILayout.LabelField("Active:", GUILayout.Width(46));
+                            if (GUILayout.Button("All")) { SetRegion(k, g, Region.All); }
+                            if (GUILayout.Button("None")) { SetRegion(k, g, Region.None); }
+                            if (GUILayout.Button("Upper")) { SetRegion(k, g, Region.Upper); }
+                            if (GUILayout.Button("Lower")) { SetRegion(k, g, Region.Lower); }
+                            int active = CountActiveBody(k, g.Motion);
+                            EditorGUILayout.LabelField(KimodoPoseConstraints.HasInactive(k)
+                                ? $"{active}/{BodyJoints.Length} joints constrained" : "whole body",
+                                EditorStyles.miniLabel);
+                        }
+                    }
                 }
             }
             if (removeAt >= 0) { Undo.RecordObject(p, "Remove pose key"); p.keys.RemoveAt(removeAt); if (_selKey >= p.keys.Count) _selKey = -1; }
@@ -121,6 +140,79 @@ namespace AminHP.KimodoBridge.Editor
             System.Array.Copy(clip.localQuats, f * J * 4, k.localQuats, 0, J * 4);
             k.root = new Vector3(clip.rootPositions[f * 3], clip.rootPositions[f * 3 + 1], clip.rootPositions[f * 3 + 2]);
             k.hasPose = true;
+        }
+
+        // ---- joint activation --------------------------------------------------------------
+        private enum Region { All, None, Upper, Lower }
+
+        private void SetRegion(KimodoPoseConstraints.Key k, KimodoGenerator g, Region r)
+        {
+            var motion = g.Motion; int J = motion.jointCount;
+            Undo.RecordObject(Pc, "Set active region");
+            if (r == Region.All) { k.jointActive = null; EditorUtility.SetDirty(Pc); SceneView.RepaintAll(); return; }
+            var active = new bool[J];
+            for (int i = 0; i < J; i++) active[i] = r != Region.None;   // None = all off, else start all on
+            if (r == Region.Upper) // keep the upper body: drop both leg chains.
+            {
+                SetSubtree(active, motion, KimodoFK.BoneIndex(motion, "LeftLeg"), false);
+                SetSubtree(active, motion, KimodoFK.BoneIndex(motion, "RightLeg"), false);
+            }
+            else if (r == Region.Lower) // keep the lower body: drop everything above the pelvis.
+            {
+                SetSubtree(active, motion, KimodoFK.BoneIndex(motion, "Spine1"), false);
+            }
+            // Region.None: leave everything off.
+            k.jointActive = active;
+            EditorUtility.SetDirty(Pc);
+            SceneView.RepaintAll();
+        }
+
+        // Toggle EXACTLY one joint (independent, not a chain), so you can e.g. deactivate everything
+        // except a hand. Use the region buttons for bulk changes.
+        private void ToggleJoint(KimodoPoseConstraints.Key k, KimodoMotion motion, int j)
+        {
+            Undo.RecordObject(Pc, "Toggle joint");
+            EnsureJointActive(k, motion.jointCount);
+            k.jointActive[j] = !k.jointActive[j];
+            if (!KimodoPoseConstraints.HasInactive(k)) k.jointActive = null; // all on -> whole body
+            EditorUtility.SetDirty(Pc);
+        }
+
+        private static void EnsureJointActive(KimodoPoseConstraints.Key k, int J)
+        {
+            if (k.jointActive != null && k.jointActive.Length == J) return;
+            var a = new bool[J];
+            for (int i = 0; i < J; i++) a[i] = k.jointActive == null || i >= k.jointActive.Length || k.jointActive[i];
+            k.jointActive = a;
+        }
+
+        private static void SetSubtree(bool[] active, KimodoMotion motion, int root, bool value)
+        {
+            if (root < 0) return;
+            for (int j = 0; j < motion.bones.Count && j < active.Length; j++)
+                if (IsDescendantOf(motion, j, root)) active[j] = value;
+        }
+
+        private static bool IsDescendantOf(KimodoMotion motion, int j, int root)
+        {
+            int t = j, guard = 0;
+            while (t >= 0 && guard++ < 200) { if (t == root) return true; t = motion.bones[t].parent; }
+            return false;
+        }
+
+        private static bool IsActive(KimodoPoseConstraints.Key k, int j) =>
+            k.jointActive == null || j < 0 || j >= k.jointActive.Length || k.jointActive[j];
+
+        private int CountActiveBody(KimodoPoseConstraints.Key k, KimodoMotion motion)
+        {
+            if (k.jointActive == null) return BodyJoints.Length;
+            int c = 0;
+            foreach (var name in BodyJoints)
+            {
+                int j = KimodoFK.BoneIndex(motion, name);
+                if (j >= 0 && j < k.jointActive.Length && k.jointActive[j]) c++;
+            }
+            return c;
         }
 
         // ---------------------------------------------------------------
@@ -177,34 +269,49 @@ namespace AminHP.KimodoBridge.Editor
             KimodoFK.GlobalPose(motion, kd, 0, out var gpos, out var grot);
             Vector3 W(int j) => KimodoRootMap.KimodoToWorld(gpos[j], _map);
 
-            // Bones between body joints.
-            Handles.color = selected ? new Color(0.4f, 0.9f, 1f, 1f) : new Color(0.5f, 0.7f, 0.9f, 0.6f);
+            // Bones between body joints (deactivated joints drawn dimmed).
             for (int b = 0; b < _bodyIdx.Length; b++)
             {
                 int j = _bodyIdx[b]; if (j < 0) continue;
                 int par = motion.bones[j].parent;
-                if (par >= 0) Handles.DrawAAPolyLine(selected ? 6f : 3f, W(par), W(j));
+                if (par < 0) continue;
+                Handles.color = IsActive(k, j)
+                    ? (selected ? new Color(0.4f, 0.9f, 1f, 1f) : new Color(0.5f, 0.7f, 0.9f, 0.6f))
+                    : new Color(0.5f, 0.5f, 0.5f, selected ? 0.35f : 0.2f);
+                Handles.DrawAAPolyLine(selected ? 6f : 3f, W(par), W(j));
             }
 
-            // Joint dots.
+            // Joint dots. In activate mode a click toggles the joint (+ its chain); otherwise it
+            // selects the joint for rotation. Green = active, red = deactivated.
             for (int b = 0; b < _bodyIdx.Length; b++)
             {
                 int j = _bodyIdx[b]; if (j < 0) continue;
                 Vector3 pos = W(j);
                 float s = HandleUtility.GetHandleSize(pos);
+                bool on = IsActive(k, j);
                 bool js = selected && _selJoint == j;
-                Handles.color = js ? Color.yellow : (selected ? new Color(1f, 0.6f, 0.2f, 1f) : new Color(1f, 0.6f, 0.2f, 0.5f));
+                if (_activateMode)
+                    Handles.color = on ? new Color(0.3f, 1f, 0.4f, selected ? 1f : 0.6f)
+                                       : new Color(1f, 0.3f, 0.3f, selected ? 1f : 0.5f);
+                else
+                    Handles.color = js ? Color.yellow
+                                  : on ? (selected ? new Color(1f, 0.6f, 0.2f, 1f) : new Color(1f, 0.6f, 0.2f, 0.5f))
+                                       : new Color(0.5f, 0.5f, 0.5f, selected ? 0.5f : 0.3f);
                 if (selected)
                 {
                     if (Handles.Button(pos, Quaternion.identity, s * 0.09f, s * 0.13f, Handles.SphereHandleCap))
-                    { _selJoint = j; Repaint(); }
+                    {
+                        if (_activateMode) { ToggleJoint(k, motion, j); SceneView.RepaintAll(); }
+                        else _selJoint = j;
+                        Repaint();
+                    }
                 }
                 else Handles.SphereHandleCap(0, pos, Quaternion.identity, s * 0.06f, EventType.Repaint);
             }
 
             // Move the whole pose (root position, incl. HEIGHT) — this is how you lift a pose in Y,
             // e.g. onto a box. World-axis handle: green = up. Waypoints only move on the ground (X/Z).
-            if (selected)
+            if (selected && !_activateMode)
             {
                 Vector3 rootW = W(motion.rootIndex);
                 EditorGUI.BeginChangeCheck();
@@ -220,7 +327,7 @@ namespace AminHP.KimodoBridge.Editor
 
             // Rotate the selected joint (world gizmo -> Kimodo local rotation). The root uses the
             // move handle above instead, so skip it here to avoid two overlapping gizmos at the pelvis.
-            if (selected && _selJoint >= 0 && _selJoint != motion.rootIndex)
+            if (selected && !_activateMode && _selJoint >= 0 && _selJoint != motion.rootIndex)
             {
                 int j = _selJoint;
                 Quaternion worldRot = _map.charRot * FlipQ(grot[j]);

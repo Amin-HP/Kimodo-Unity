@@ -40,6 +40,7 @@ from kimodo import load_model
 from kimodo.constraints import (
     TYPE_TO_CLASS,
     EndEffectorConstraintSet,
+    FullBodyConstraintSet,
     LeftFootConstraintSet,
     LeftHandConstraintSet,
     RightFootConstraintSet,
@@ -285,6 +286,12 @@ def _build_constraint_dicts(
         if joint_names:
             d["joint_names"] = list(joint_names)
 
+        # fullbody only: an active-joint subset -> constrain ONLY these joints' positions (partial
+        # pose, e.g. upper body). Resolved to indices at load time (robust to SOMA 30/77).
+        active = c.get("activeJoints")
+        if ctype == "fullbody" and active:
+            d["active_joint_names"] = list(active)
+
         # Optional per-keyframe target offsets (Kimodo coords): shift of the pinned joint from its
         # captured position, so the user can drag a hand/foot to a new target. Stashed under a
         # private key (from_dict ignores it) and applied after the constraint objects are built.
@@ -436,9 +443,75 @@ class _SingleJointTarget:
         return self  # tensors are already placed by the builder
 
 
+class _PartialFullBody:
+    """A pose constraint restricted to a subset of joints (by index). It constrains ONLY the active
+    joints' global positions (+ the required smooth_root_2d/root_y/heading) in the diffusion GUIDANCE,
+    leaving the rest of the body free — so a pose key can drive, e.g., only the upper body.
+
+    It is intentionally NOT a FullBodyConstraintSet subclass: postprocess (postprocess.py) rewrites the
+    WHOLE body's rotations for any FullBody/EndEffector constraint (it can't do per-joint), which would
+    snap the free joints back to the pose. Being a plain class, postprocess skips it (its else branch is
+    a no-op), so the inactive joints stay free.
+    """
+
+    name = "fullbody-partial"
+
+    def __init__(self, skeleton, frame_indices, global_joints_positions, global_joints_rots,
+                 smooth_root_2d, root_y_pos, global_root_heading, active_indices):
+        self.skeleton = skeleton
+        self.frame_indices = frame_indices                      # [N] (CPU)
+        self.global_joints_positions = global_joints_positions  # [N, J, 3]    (device)
+        self.global_joints_rots = global_joints_rots            # [N, J, 3, 3] (device)
+        self.smooth_root_2d = smooth_root_2d                    # [N, 2] (device)
+        self.root_y_pos = root_y_pos                            # [N]    (device)
+        self.global_root_heading = global_root_heading          # [N, 2] (device)
+        self.active_indices = active_indices                    # [K] LongTensor (CPU)
+
+    @classmethod
+    def from_full(cls, base: FullBodyConstraintSet, active_indices: "torch.Tensor") -> "_PartialFullBody":
+        return cls(base.skeleton, base.frame_indices, base.global_joints_positions, base.global_joints_rots,
+                   base.smooth_root_2d, base.root_y_pos, base.global_root_heading, active_indices)
+
+    def update_constraints(self, data_dict: dict, index_dict: dict) -> None:
+        # Constrain the active joints' global POSITIONS and ROTATIONS (index tensors stay on CPU; the
+        # data tensors live on their own device). Rotations are the primary pose channel — imputing
+        # them is what makes a partial pose actually stick without the whole-body postprocess snap.
+        active_cpu = self.active_indices
+        dev = self.global_joints_positions.device
+        active_dev = active_cpu.to(dev)
+        pairs = create_pairs(self.frame_indices, active_cpu)  # CPU [N*K, 2] (t, j)
+
+        data_dict["global_joints_positions"].append(self.global_joints_positions[:, active_dev, :].reshape(-1, 3))
+        index_dict["global_joints_positions"].append(pairs)
+
+        data_dict["global_joints_rots"].append(self.global_joints_rots[:, active_dev, :, :].reshape(-1, 3, 3))
+        index_dict["global_joints_rots"].append(pairs)
+
+        # Root channels are required whenever global positions are constrained.
+        data_dict["smooth_root_2d"].append(self.smooth_root_2d)
+        index_dict["smooth_root_2d"].append(self.frame_indices)
+        data_dict["root_y_pos"].append(self.root_y_pos)
+        index_dict["root_y_pos"].append(self.frame_indices)
+        data_dict["global_root_heading"].append(self.global_root_heading)
+        index_dict["global_root_heading"].append(self.frame_indices)
+
+    def crop_move(self, start: int, end: int) -> "_PartialFullBody":
+        mask = (self.frame_indices >= start) & (self.frame_indices < end)   # CPU bool
+        md = mask.to(self.global_joints_positions.device)
+        return _PartialFullBody(
+            self.skeleton, self.frame_indices[mask] - start,
+            self.global_joints_positions[md], self.global_joints_rots[md], self.smooth_root_2d[md],
+            self.root_y_pos[md], self.global_root_heading[md], self.active_indices,
+        )
+
+    def to(self, device=None, dtype=None):
+        return self  # tensors already placed by the builder
+
+
 def _load_constraints(con_dicts: list[dict], skeleton) -> list:
     """Build constraint objects. Direct effector targets use _SingleJointTarget; captured-pose
-    effector pins use the position-only subclasses; root2d/fullbody use their default classes.
+    effector pins use the position-only subclasses; a fullbody with an active-joint subset uses
+    _PartialFullBody; root2d/fullbody use their default classes.
     """
     lst = []
     dev = skeleton.device if hasattr(skeleton, "device") else "cpu"
@@ -453,6 +526,13 @@ def _load_constraints(con_dicts: list[dict], skeleton) -> list:
                 q = torch.tensor(d["rot_quats"], dtype=torch.float32, device=dev).reshape(-1, 4)  # wxyz
                 rots = quaternion_to_matrix(q)  # [N, 3, 3]
             lst.append(_SingleJointTarget(skeleton, frames, jidx, pos, rots, sr, bool(d.get("constrain_rot"))))
+        elif d["type"] == "fullbody" and d.get("active_joint_names"):
+            # Partial pose: keep only the named joints that exist in this skeleton (30/77-safe).
+            idx = [skeleton.bone_index[n] for n in d["active_joint_names"] if n in skeleton.bone_index]
+            if not idx:
+                continue
+            base = FullBodyConstraintSet.from_dict(skeleton, d)
+            lst.append(_PartialFullBody.from_full(base, torch.tensor(idx, dtype=torch.long)))
         else:
             cls = _POSITION_ONLY_CLASSES.get(d["type"], TYPE_TO_CLASS[d["type"]])
             lst.append(cls.from_dict(skeleton, d))

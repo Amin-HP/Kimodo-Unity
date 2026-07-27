@@ -37,6 +37,7 @@ Shader "Kimodo/GhostMesh"
             {
                 float4 positionOS : POSITION;
                 float3 normalOS   : NORMAL;
+                float4 color      : COLOR;   // per-vertex activation mask in .a (1 = show, 0 = hide)
             };
 
             struct Varyings
@@ -44,6 +45,7 @@ Shader "Kimodo/GhostMesh"
                 float4 positionHCS : SV_POSITION;
                 float3 normalWS    : TEXCOORD0;
                 float3 positionWS  : TEXCOORD1;
+                float  mask        : TEXCOORD2;
             };
 
             Varyings vert (Attributes IN)
@@ -53,6 +55,7 @@ Shader "Kimodo/GhostMesh"
                 OUT.positionHCS = p.positionCS;
                 OUT.positionWS  = p.positionWS;
                 OUT.normalWS    = TransformObjectToWorldNormal(IN.normalOS);
+                OUT.mask        = IN.color.a;
                 return OUT;
             }
 
@@ -62,7 +65,8 @@ Shader "Kimodo/GhostMesh"
                 float3 v = GetWorldSpaceNormalizeViewDir(IN.positionWS);
                 float fres = pow(saturate(1.0 - saturate(dot(n, v))), _RimPower);
                 float3 col = lerp(_BaseColor.rgb, _RimColor.rgb, fres);
-                float  a   = saturate(_BaseColor.a + fres * _RimColor.a);
+                // Per-vertex activation mask fades out deactivated regions (smooth via skin weights).
+                float  a   = saturate(_BaseColor.a + fres * _RimColor.a) * saturate(IN.mask);
                 return half4(col, a);
             }
             ENDHLSL

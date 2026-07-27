@@ -4,6 +4,10 @@
 // retarget path as the live preview (KimodoPlayer). Lets you see the actual model (skin/mesh
 // renderers) — not just the skeleton — while you edit a pose, without moving the real character.
 //
+// Deactivated joints (per key) fade out on the ghost: each vertex's opacity is the skin-weighted
+// average of its bones' active flags, so the boundary blends smoothly (no hard cut). A per-key
+// signature avoids recomputing vertex colors unless the activation actually changed.
+//
 // Clones are HideAndDontSave and are torn down when the editor is deselected/disposed. The
 // character's own (inert) Kimodo components are cloned too but never run: they are not
 // [ExecuteAlways] and have no Update, and Awake/OnEnable don't fire in edit mode.
@@ -17,10 +21,22 @@ namespace AminHP.KimodoBridge.Editor
 {
     public class KimodoPoseGhosts : IDisposable
     {
+        private class SkinnedInfo
+        {
+            public SkinnedMeshRenderer smr;
+            public Mesh mesh;              // instanced copy we own (colors carry the activation mask)
+            public BoneWeight[] weights;
+            public Color[] colors;         // reused buffer
+        }
+
         private class Ghost
         {
             public GameObject go;
+            public Animator anim;
             public KimodoPlayer player;
+            public List<SkinnedInfo> skinned = new List<SkinnedInfo>();
+            public List<Mesh> ownedMeshes = new List<Mesh>();  // to destroy (skinned + static instances)
+            public int activeSig = int.MinValue;               // last applied activation signature
         }
 
         private readonly Dictionary<KimodoPoseConstraints.Key, Ghost> _ghosts =
@@ -30,9 +46,6 @@ namespace AminHP.KimodoBridge.Editor
         private KimodoMotion _motionRef; // motion the ghost players are bound to
         private bool _swept;             // cleaned stray clones from a previous domain reload
         private const string GhostName = "~KimodoPoseGhost";
-
-        // Fixed ghost look: white, ~51% base opacity (fresnel rim adds a subtle edge on top).
-        private static readonly Color GhostColor = new Color(1f, 1f, 1f, 0.51f);
 
         private Material Mat
         {
@@ -44,7 +57,6 @@ namespace AminHP.KimodoBridge.Editor
                     if (sh != null)
                     {
                         _mat = new Material(sh) { hideFlags = HideFlags.HideAndDontSave };
-                        _mat.SetColor("_BaseColor", GhostColor);
                         _mat.SetColor("_RimColor", new Color(1f, 1f, 1f, 0.4f));
                     }
                 }
@@ -65,6 +77,9 @@ namespace AminHP.KimodoBridge.Editor
 
             var srcGo = tgt.gameObject;
             if (_sourceRef != srcGo || _motionRef != g.Motion) { DestroyAll(); _sourceRef = srcGo; _motionRef = g.Motion; }
+
+            // White ghost, opacity from the slider.
+            Mat.SetColor("_BaseColor", new Color(1f, 1f, 1f, Mathf.Clamp01(pc.ghostOpacity)));
 
             int need = g.Motion.jointCount * 4;
 
@@ -90,6 +105,10 @@ namespace AminHP.KimodoBridge.Editor
                 ghost.go.transform.localScale = srcGo.transform.lossyScale;
                 ghost.player.RootMotionScale = g.rootMotionScale;
                 ghost.player.PoseFromLocal(k.localQuats, k.root);
+
+                // Refresh the fade mask only when the activation changed.
+                int sig = ActiveSig(k);
+                if (ghost.activeSig != sig) { ApplyActivation(ghost, k, g.Motion); ghost.activeSig = sig; }
             }
         }
 
@@ -98,6 +117,7 @@ namespace AminHP.KimodoBridge.Editor
             var clone = UnityEngine.Object.Instantiate(srcGo);
             clone.name = GhostName;
             clone.hideFlags = HideFlags.HideAndDontSave;
+            var gh = new Ghost { go = clone };
 
             // Swap every renderer to the shared ghost material; no shadows.
             foreach (var r in clone.GetComponentsInChildren<Renderer>(true))
@@ -109,14 +129,129 @@ namespace AminHP.KimodoBridge.Editor
                 r.receiveShadows = false;
             }
 
-            var anim = clone.GetComponent<Animator>() ?? clone.GetComponentInChildren<Animator>();
-            if (anim == null) { UnityEngine.Object.DestroyImmediate(clone); return null; }
-            anim.runtimeAnimatorController = null; // don't let it evaluate a controller
+            // Instance skinned meshes so we can write per-vertex activation into their colors.
+            foreach (var smr in clone.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (smr.sharedMesh == null) continue;
+                var inst = UnityEngine.Object.Instantiate(smr.sharedMesh);
+                inst.hideFlags = HideFlags.HideAndDontSave;
+                smr.sharedMesh = inst;
+                var colors = SolidWhite(inst.vertexCount);
+                inst.colors = colors;
+                gh.skinned.Add(new SkinnedInfo { smr = smr, mesh = inst, weights = inst.boneWeights, colors = colors });
+                gh.ownedMeshes.Add(inst);
+            }
+            // Static meshes: give them a defined (fully-visible) vertex-colour channel too.
+            foreach (var mf in clone.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf.sharedMesh == null) continue;
+                var inst = UnityEngine.Object.Instantiate(mf.sharedMesh);
+                inst.hideFlags = HideFlags.HideAndDontSave;
+                inst.colors = SolidWhite(inst.vertexCount);
+                mf.sharedMesh = inst;
+                gh.ownedMeshes.Add(inst);
+            }
 
-            var player = new KimodoPlayer();
-            if (!player.Bind(anim, motion)) { player.Dispose(); UnityEngine.Object.DestroyImmediate(clone); return null; }
-            return new Ghost { go = clone, player = player };
+            var anim = clone.GetComponent<Animator>() ?? clone.GetComponentInChildren<Animator>();
+            if (anim == null) { Destroy(gh); return null; }
+            anim.runtimeAnimatorController = null; // don't let it evaluate a controller
+            gh.anim = anim;
+
+            gh.player = new KimodoPlayer();
+            if (!gh.player.Bind(anim, motion)) { Destroy(gh); return null; }
+            return gh;
         }
+
+        private static Color[] SolidWhite(int n)
+        {
+            var c = new Color[n];
+            for (int i = 0; i < n; i++) c[i] = Color.white;
+            return c;
+        }
+
+        // ---- activation / fade -------------------------------------------------------------
+
+        private static int ActiveSig(KimodoPoseConstraints.Key k)
+        {
+            if (k.jointActive == null) return 0;
+            int h = 17;
+            for (int i = 0; i < k.jointActive.Length; i++) h = h * 31 + (k.jointActive[i] ? 1 : 0);
+            return h;
+        }
+
+        // Write each vertex's opacity = skin-weighted average of its bones' active flags.
+        private static void ApplyActivation(Ghost gh, KimodoPoseConstraints.Key key, KimodoMotion motion)
+        {
+            bool allActive = !KimodoPoseConstraints.HasInactive(key);
+
+            // SOMA joint active flags -> per-HumanBodyBones active (via the SOMA->Human map).
+            Dictionary<HumanBodyBones, float> activeHbb = null;
+            if (!allActive && key.jointActive != null)
+            {
+                activeHbb = new Dictionary<HumanBodyBones, float>();
+                for (int j = 0; j < motion.bones.Count && j < key.jointActive.Length; j++)
+                    if (KimodoSomaHumanoid.SomaToHuman.TryGetValue(motion.bones[j].name, out var hbb))
+                        activeHbb[hbb] = key.jointActive[j] ? 1f : 0f;
+            }
+
+            // Clone bone transform -> HumanBodyBones (to resolve each skin bone's active flag).
+            Dictionary<Transform, HumanBodyBones> t2hbb = null;
+            if (!allActive && gh.anim != null)
+            {
+                t2hbb = new Dictionary<Transform, HumanBodyBones>();
+                for (int i = 0; i < (int)HumanBodyBones.LastBone; i++)
+                {
+                    var t = gh.anim.GetBoneTransform((HumanBodyBones)i);
+                    if (t != null) t2hbb[t] = (HumanBodyBones)i;
+                }
+            }
+
+            foreach (var sm in gh.skinned)
+            {
+                var colors = sm.colors;
+                if (allActive)
+                {
+                    for (int v = 0; v < colors.Length; v++) colors[v] = Color.white;
+                    sm.mesh.colors = colors;
+                    continue;
+                }
+
+                var bones = sm.smr.bones;
+                var boneAct = new float[bones.Length];
+                for (int b = 0; b < bones.Length; b++)
+                    boneAct[b] = ResolveBoneActive(bones[b], t2hbb, activeHbb);
+
+                var bw = sm.weights;
+                int n = Mathf.Min(colors.Length, bw.Length);
+                for (int v = 0; v < n; v++)
+                {
+                    var w = bw[v];
+                    float a = w.weight0 * BoneAct(boneAct, w.boneIndex0)
+                            + w.weight1 * BoneAct(boneAct, w.boneIndex1)
+                            + w.weight2 * BoneAct(boneAct, w.boneIndex2)
+                            + w.weight3 * BoneAct(boneAct, w.boneIndex3);
+                    colors[v] = new Color(1f, 1f, 1f, Mathf.Clamp01(a));
+                }
+                sm.mesh.colors = colors;
+            }
+        }
+
+        private static float BoneAct(float[] act, int idx) => (idx >= 0 && idx < act.Length) ? act[idx] : 1f;
+
+        // Walk up the bone's parents until a humanoid bone with a known active flag is found.
+        private static float ResolveBoneActive(Transform bone, Dictionary<Transform, HumanBodyBones> t2hbb,
+                                               Dictionary<HumanBodyBones, float> activeHbb)
+        {
+            var t = bone; int guard = 0;
+            while (t != null && guard++ < 64)
+            {
+                if (t2hbb.TryGetValue(t, out var hbb) && activeHbb.TryGetValue(hbb, out var a)) return a;
+                t = t.parent;
+            }
+            return 1f; // no mapped ancestor -> keep visible
+        }
+
+        // ---- lifecycle ---------------------------------------------------------------------
 
         // Destroy any ghost clones left over by a previous editor instance (e.g. after a domain
         // reload, where our tracking dictionary was reset but the HideAndDontSave objects survived).
@@ -132,6 +267,8 @@ namespace AminHP.KimodoBridge.Editor
         private static void Destroy(Ghost gh)
         {
             gh.player?.Dispose();
+            foreach (var m in gh.ownedMeshes) if (m != null) UnityEngine.Object.DestroyImmediate(m);
+            gh.ownedMeshes.Clear();
             if (gh.go != null) UnityEngine.Object.DestroyImmediate(gh.go);
         }
 
