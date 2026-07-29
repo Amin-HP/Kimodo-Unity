@@ -5,6 +5,7 @@ text-to-motion diffusion model and **Unity 6**.
 
 Type a prompt → generate human motion → preview it live on any **Humanoid** character → author
 **constraints** (root path, hand/foot targets, whole-body poses) → **bake** to an `AnimationClip`.
+Sequence several prompts into a whole shot with the **timeline** window.
 
 > Independent wrapper by **AminHP** — **not** affiliated with, sponsored by, or endorsed by NVIDIA.
 > Apache-2.0. See [THIRD-PARTY-NOTICES](Packages/com.aminhp.kimodobridge/THIRD-PARTY-NOTICES.md).
@@ -33,6 +34,7 @@ so it fits in 8 GB VRAM.
    - `GameObject ▸ Kimodo ▸ Bridge Manager` → **Connect**.
    - Select a **Humanoid** character → `GameObject ▸ Kimodo ▸ Set Up Selected Character`.
    - On **KimodoGenerator**: prompt → **Generate** → preview → **Bake to AnimationClip**.
+   - For a multi-prompt shot: `Window ▸ Kimodo ▸ Timeline`.
 
 Full usage, constraints, and the runtime API are in the
 [package README](Packages/com.aminhp.kimodobridge/README.md).
@@ -41,6 +43,11 @@ Full usage, constraints, and the runtime API are in the
 
 - **Text → motion** on a local Kimodo server, retargeted onto any Unity Humanoid (Mecanim muscle space).
 - **Live preview** (play / scrub) and **bake** to a reusable humanoid `.anim` (in-place or travelling).
+- **Timeline** (`Window ▸ Kimodo ▸ Timeline`) — sequence a shot as ordered **prompt segments**, each with
+  its own duration, in a **Kimodo Timeline** asset you assign to the character. One frame axis carries the
+  segments plus every constraint key (waypoints / effectors / pose keys): drag a segment edge to retime,
+  drag keys to move them, split / duplicate / reorder, and Generate + Bake from the same window.
+  Per-segment **constraint weight** lets one beat pin harder than the next.
 - **Constraints**, authored with Scene-view gizmos and sent as soft diffusion guidance:
   - **Waypoints** — ground root path (X/Z) + per-waypoint facing.
   - **Effectors** — per-frame hand / foot targets via full-body IK.
