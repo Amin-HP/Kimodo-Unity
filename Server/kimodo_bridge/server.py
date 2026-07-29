@@ -26,6 +26,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 import traceback
@@ -85,6 +86,13 @@ class GenerateRequest(BaseModel):
     cfg_weight: Optional[List[float]] = Field(
         default=None,
         description="Optional [text_weight, constraint_weight]. Defaults to Kimodo's own default.",
+    )
+    segment_cfg_weights: Optional[List[float]] = Field(
+        default=None,
+        description=(
+            "Optional per-segment constraint weights: one value per prompt segment, overriding "
+            "cfg_weight[1] for that segment only. Must have exactly one entry per segment."
+        ),
     )
     postprocess: bool = Field(default=True, description="Foot-skate cleanup (ignored for G1).")
     include_positions: bool = Field(
@@ -595,6 +603,48 @@ def load(req: LoadModelRequest) -> dict:
     return {"loaded": resolved, "displayName": info.display_name if info else resolved}
 
 
+@contextlib.contextmanager
+def _per_segment_constraint_weight(model, weights: list[float]):
+    """Give each prompt segment its own constraint guidance strength.
+
+    Kimodo's ``_multiprompt`` generates one segment at a time, calling ``model._generate(...)``
+    exactly once per segment, in order, and handing each the *same* ``cfg_weight``. There is no
+    public per-segment knob, so for the duration of one request we shadow ``_generate`` with a
+    wrapper that rewrites ``cfg_weight[1]`` (the constraint weight; ``cfg_weight[0]``, the text
+    weight, is left alone) using the Nth entry of ``weights``.
+
+    Deliberately defensive: if Kimodo ever changes how many times ``_generate`` is called, calls
+    past the end of the list keep the caller's original weight and the mismatch is logged, so the
+    worst case is "the global weight was used" rather than a crash or silently shifted weights.
+    """
+    original = model._generate
+    had_own = "_generate" in model.__dict__
+    state = {"calls": 0}
+
+    def wrapped(*args, **kwargs):
+        i = state["calls"]
+        state["calls"] += 1
+        cw = kwargs.get("cfg_weight")
+        if i < len(weights) and isinstance(cw, (list, tuple)) and len(cw) == 2:
+            kwargs = dict(kwargs)
+            kwargs["cfg_weight"] = [cw[0], float(weights[i])]
+        return original(*args, **kwargs)
+
+    model._generate = wrapped
+    try:
+        yield state
+    finally:
+        if had_own:
+            model._generate = original
+        else:
+            model.__dict__.pop("_generate", None)
+        if state["calls"] != len(weights):
+            print(
+                f"[kimodo-bridge] per-segment constraint weights: expected {len(weights)} segment "
+                f"generations but saw {state['calls']}; some segments used the global weight."
+            )
+
+
 def _texts_and_frames(prompt: str, duration: str, fps: float) -> tuple[list[str], list[int]]:
     """Replicate generate.py: split prompt on periods, map durations to frame counts."""
     texts = [t.strip() for t in prompt.split(".")]
@@ -662,20 +712,38 @@ def generate(req: GenerateRequest) -> dict:
                 except Exception as exc:  # noqa: BLE001 - surface constraint errors to the client
                     raise HTTPException(status_code=400, detail=f"Failed to build constraints: {exc}") from exc
 
+        # Optional per-segment constraint weight (one value per prompt segment).
+        seg_weights = req.segment_cfg_weights
+        if seg_weights:
+            if len(seg_weights) != len(texts):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Got {len(seg_weights)} segment constraint weights for {len(texts)} prompt "
+                        "segments; counts must match."
+                    ),
+                )
+            seg_weights = [float(w) for w in seg_weights]
+
         try:
             with torch.no_grad():
-                output = model(
-                    texts,
-                    num_frames,
-                    num_denoising_steps=req.diffusion_steps,
-                    constraint_lst=constraint_lst,
-                    num_samples=req.num_samples,
-                    multi_prompt=True,
-                    num_transition_frames=req.num_transition_frames,
-                    cfg_weight=cfg_weight,
-                    post_processing=use_postprocess,
-                    return_numpy=True,
-                )
+                with (
+                    _per_segment_constraint_weight(model, seg_weights)
+                    if seg_weights
+                    else contextlib.nullcontext()
+                ):
+                    output = model(
+                        texts,
+                        num_frames,
+                        num_denoising_steps=req.diffusion_steps,
+                        constraint_lst=constraint_lst,
+                        num_samples=req.num_samples,
+                        multi_prompt=True,
+                        num_transition_frames=req.num_transition_frames,
+                        cfg_weight=cfg_weight,
+                        post_processing=use_postprocess,
+                        return_numpy=True,
+                    )
         except Exception as exc:  # noqa: BLE001 - surface the real error to the client + logs
             traceback.print_exc()
             n_con = len(constraint_lst)

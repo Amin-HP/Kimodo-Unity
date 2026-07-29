@@ -5,7 +5,7 @@
 > `C:\Users\mahag\.claude\projects\h--kimodo\memory\` (`kimodo-unity-bridge.md` — detailed running log,
 > `kimodo-setup.md` — how Kimodo is installed).
 
-Last updated: 2026-07-27. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
+Last updated: 2026-07-29. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
 Published: **https://github.com/Amin-HP/Kimodo-Unity** (branch `main`, currently private). The repo bundles a
 copy of the Python server under `Server/` — **re-sync it from the live `H:\kimodo\kimodo\kimodo_bridge\server.py`
 before each push** (see the `kimodo-github-repo` memory).
@@ -82,6 +82,9 @@ Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`*
 - `KimodoRootMap.cs` — affine world↔Kimodo (measured from preview): `Compute`, `WorldToKimodo`, `KimodoToWorld`,
   `WorldToKimodoQuatWXYZ`. Proven correct (waypoints).
 - `KimodoRootBake.cs` — `enum KimodoRootBake { InPlace, Travel }`.
+- `KimodoTimeline.cs` — the timeline **asset** (`ScriptableObject`, Assets ▸ Create ▸ Kimodo ▸ Timeline): ordered
+  prompt `Segment`s (`prompt` + `seconds`), `BuildPrompt()`/`BuildDuration()` (the multi-prompt encoding),
+  frame math (`StartFrame`/`FrameCountOf`/`TotalFrames`/`SegmentAtFrame`), and a saved `Take` (see §7c).
 - `KimodoMotionPlayer.cs` — runtime component to play a `KimodoMotion` from code.
 - `KimodoGhost.shader` — `"Kimodo/GhostMesh"`, URP transparent fresnel used by the pose ghost-mesh preview.
 - **Components:** `KimodoBridge.cs` (manager), `KimodoGenerator.cs` (per-character generate+preview+bake state),
@@ -92,6 +95,7 @@ Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`*
 - `KimodoBaker.cs` — bake `KimodoMotion` → Humanoid `AnimationClip` (RootT/RootQ + muscle curves).
 - `KimodoBridgeEditor.cs`, `KimodoGeneratorEditor.cs`, `KimodoEffectorsEditor.cs`, `KimodoWaypointsEditor.cs`,
   `KimodoPoseConstraintsEditor.cs` — custom inspectors + Scene gizmos.
+- `KimodoTimelineWindow.cs` — the sequencer window (`Window ▸ Kimodo ▸ Timeline`), see §7c.
 - `KimodoPoseGhosts.cs` — manages the transparent ghost-mesh clones for the pose-constraint editor (see §7).
 - `KimodoMenu.cs` — the `GameObject ▸ Kimodo ▸ …` menu items.
   (The legacy all-in-one `KimodoBridgeWindow.cs` was **removed** in the v0.1.0 cleanup — component workflow only.)
@@ -254,6 +258,122 @@ Unity components:
   on the **first** Generate. Placement is **approximate** until a real motion refines the mapping. **Server change
   (`/skeleton`) → restart the bridge.**
 
+## 7c. Timeline / sequencer (2026-07-29)
+
+**`Window ▸ Kimodo ▸ Timeline`** — one dockable window over a character's whole shot. Built as a custom
+IMGUI `EditorWindow` (the decision from 2026-07-27: **not** Unity's native Timeline, whose runtime
+Playables/binding model is a poor fit for an author-then-bake diffusion tool).
+
+- **The file** is `KimodoTimeline` (a `ScriptableObject` asset) assigned to `KimodoGenerator.timeline`.
+  It owns the shot's **prompt segments** (`prompt` + `seconds` each). `KimodoGenerator.EffectivePrompt` /
+  `EffectiveDuration` compose them into Kimodo's own encoding ("A. B." + `"2 3"`) and `Generate()` sends
+  those; with no asset assigned the Generator's single prompt/duration fields are used exactly as before
+  (fully backwards-compatible). `EstimatedFrameCount` reads `EffectiveDuration`, so the frame axis and all
+  the "Add @ frame" authoring work **before** the first generate.
+- **Where the keys live:** the constraint keys stay on the scene components (`KimodoWaypoints` /
+  `KimodoEffectors` / `KimodoPoseConstraints`) — they hold world positions and draw Scene gizmos, so the
+  scene is their home. The window is a second view onto the same data as the inspectors; edits from either
+  side agree. `Take ▸ Save/Load` copies them in and out of the asset (`KimodoTimeline.CaptureTake` /
+  `ApplyTake`) when you want the whole shot in one file; Load **replaces** the character's keys.
+- **Tracks** (x axis = absolute frames, which is what every Kimodo constraint is keyed on): Prompt
+  (segment blocks — drag the right edge to retime, click to edit, right-click to split/duplicate/delete),
+  Waypoints, Effectors (coloured per hand/foot), Poses. Keys drag sideways to retime, right-click to
+  delete, `＋` on a track header adds at the playhead (adding the component first if missing). The bottom
+  pane edits whatever is selected — including a pose key's **prompt + Generate pose / Idle / Align to
+  frame**, so prompts, constraints and key points are all manipulable from the window.
+- Segment blocks are laid out on the **authored** durations (`FrameCountOf` = `floor(seconds × fps)`, the
+  same math the server does), so retiming shows up immediately. They still match the motion: Kimodo's
+  multi-prompt output is exactly `sum(int(seconds × fps))` frames — a segment generates `N + K` frames but
+  the previous segment's last `K` are popped first, so the transition frames are absorbed, not added.
+  (A first version laid blocks out on the generated `numFramesPerSegment` when the counts matched; that
+  **broke retiming** — the blocks and the ruler only moved after a regenerate. Don't reintroduce it.)
+- `KimodoGenerator.AuthoringFrameCount` is the timeline's own total whenever a timeline is assigned (i.e.
+  what the NEXT Generate will produce), not the current motion's length — otherwise every key clamps
+  against a stale frame count after retiming. The window's axis is `max(that, motion frames)` so keys past
+  a shortened timeline stay reachable.
+- **Interior periods are rewritten to commas** (`CleanSegmentText`) with a warning in the pane: a period
+  inside a segment would silently split it server-side and then the duration count wouldn't match the
+  prompt count (`_texts_and_frames` raises 400).
+- **Layout (2026-07-29 revision):** the selection panel is a **resizable left column** (`_paneW`, drag the
+  splitter), the timeline fills the rest — not a bottom strip. Per-selection actions are a compact glyph
+  tool strip (✂ split / ⧉ duplicate / ▲▼ reorder / ⇥ go-to / ⌖ look-at / ✕ delete); glyphs rather than
+  `EditorGUIUtility.IconContent` names, which differ between Unity versions (matches the ◉ ⋮ ✕ ＋ style the
+  rest of the package already uses).
+- **Shortcuts:** Space play/pause, Delete (or Backspace) removes the selection, ←/→ step a frame (Shift = 10),
+  Home/End jump to the ends, F looks at the selected key, Esc deselects. Guarded by
+  `EditorGUIUtility.editingTextField` so typing a prompt never triggers them, and the object fields are drawn
+  **before** `HandleShortcuts` so they consume Delete first (otherwise clearing an ObjectField would also
+  delete a key).
+- **`Editor/KimodoPlayback.cs` is THE editor playback clock** (`[InitializeOnLoad]`, one
+  `EditorApplication.update` hook, `SetPlaying`/`Toggle` + an `Advanced` event the UIs repaint on). Two
+  bugs forced it: (1) the Generator inspector AND the Timeline window each advanced `PreviewTime` from
+  their own update hook, so with the character selected and the window open everything played at **double
+  speed** (three UIs → triple, etc.); (2) `PreviewTime` was advanced without wrapping, so with Loop on the
+  playhead stuck at the last frame while the retarget kept looping. Speed now lives on the generator
+  (`PlaybackSpeed`, `[NonSerialized]`) so both UIs drive the same value. **Never advance `PreviewTime`
+  from a UI again** — call `KimodoPlayback`.
+- **Clip everything to the track area** (`FillClipped` / `ClipLabel`): a zoomed or scrolled segment block
+  is drawn from a far-negative x, and `EditorGUI.DrawRect` doesn't clip — the block bled over the header
+  column and the panel beside it. Keys were already skipped outside the area (their few px of spill land
+  on the header column, which is painted after the tracks).
+- **IMGUI rule for this window — the single most important thing to keep:** *nothing may change what the
+  window draws except at the start of a **Layout** pass.* Everything structural (selection, add/remove a
+  key or segment, swapping the character or the timeline asset, Generate, Bake, file panels, Take load) is
+  queued with `Defer(...)` — a **list**, since two actions can queue in one pass — and drained at the top
+  of `OnGUI` on `EventType.Layout`, followed by `ValidateSelection()`. Two failures taught this:
+  - "Mismatched LayoutGroup" — mutating during the event pass, so the control sequence differs from the
+    one the layout pass built.
+  - `ArgumentException: Getting control 0's position in a group with only 0 controls` (2026-07-29, hit by
+    deleting the last key) — the pane methods used to *clear the selection while drawing* when their index
+    had gone stale (e.g. the key was deleted from the component's own inspector): the layout pass then
+    registered **zero** controls and the repaint pass drew the empty panel. Panes must therefore never
+    assign `_selKind`; a stale index falls back to `DrawEmptyPane()`, and `ValidateSelection()` (layout
+    only) is what actually drops a dead selection. **Do not add `_selKind = …` inside a Draw* method.**
+- The timeline area also keeps its last known geometry during layout (`GetRect` returns a dummy rect then,
+  which would otherwise clamp the scroll offset to 0 every frame), and the scrollbar is drawn
+  unconditionally (disabled when everything fits) so the control count never changes.
+- `KimodoPoseConstraints.AlignKeyToMotion(key)` was factored out of the pose inspector so the window shares it.
+- **PER-SEGMENT CONSTRAINT WEIGHT (2026-07-29, server change → RESTART the bridge).** A segment can pin
+  harder or looser than the rest (`Segment.overrideConstraintWeight` + `constraintWeight`, shown as a `w5`
+  badge on the block). Why it works: Kimodo's `_multiprompt` generates **one segment at a time**, calling
+  `model._generate(..., cfg_weight=...)` exactly once per segment in order — there is just no public
+  per-segment knob. `server.py`'s `_per_segment_constraint_weight(model, weights)` context manager shadows
+  `model._generate` for the duration of one request and rewrites `cfg_weight[1]` (the constraint weight;
+  the text weight is untouched) with the Nth entry. Chosen over patching `kimodo_model.py` because Kimodo
+  lives **outside** this repo — a library patch would have to be re-applied by every user and lost on every
+  Kimodo update, whereas this ships in `Server/`. Defensive by design: calls past the end of the list keep
+  the caller's weight and the count mismatch is logged, so a future Kimodo refactor degrades to "the global
+  weight was used" instead of crashing or silently shifting weights. Wire: `KimodoTimeline.
+  BuildSegmentConstraintWeights(global)` (null unless some segment overrides) → `KimodoGenerateRequest.
+  segment_cfg_weights` → `GenerateRequest.segment_cfg_weights` (400 if the count ≠ segment count). Only
+  sent when there are constraints at all. Shim verified standalone (weights applied in order, `_generate`
+  restored afterwards, overflow falls back).
+- **FROZEN SEGMENTS — PARKED / HIDDEN (2026-07-29, user's call: "I want to add it in the future, but I
+  just want to hide it").** The switch is **`KimodoTimeline.FreezeEnabled` (`static readonly bool`, false)**
+  — flip that one field to bring the whole feature back. While it is false the ❄ tool button, the frozen
+  info box, "Re-capture from current motion" and the context-menu Freeze entry are all hidden, and
+  `Segment.HasFrozenContent` returns false so a segment left `frozen` in an existing asset is generated
+  normally and can still be retimed (no way to get stuck frozen with no UI to release it). Everything the
+  feature needs is still in the code, untouched: `Segment.frozen`/`frozenClip`, `FrozenClip`,
+  `FreezeSegment`, `BuildFrozenConstraints`, `KimodoGenerator.ApplyFrozenSegments`, and the window's
+  `ToggleFreeze`/`RecaptureFreeze`/`Frozen(seg)`. `static readonly` rather than `const` on purpose: a const
+  folds at compile time and turns every parked branch into an "unreachable code" warning in the console.
+  How it worked, for when it comes back: ❄ on a segment kept it exactly as generated — `FreezeSegment` copies
+  that frame range's `localQuats` + `rootPositions` out of the current motion into the asset
+  (`Segment.frozenClip`), and every later Generate (a) sends the kept content as a subsampled (~10/s)
+  `fullbody` constraint so the segments around it are generated flowing in and out of it, then (b)
+  **splices the exact frames back** over that range in every returned sample
+  (`KimodoGenerator.ApplyFrozenSegments`, run before `Motion =` so the preview and bake both see it).
+  **It does not make generation faster** — Kimodo's `_multiprompt` feeds each segment into the next
+  (transition constraints built from the previous segment's output), so a segment cannot be skipped
+  without reimplementing that loop server-side; the diffusion still runs over the whole sequence. A frozen
+  segment's duration is **locked** to the frames it kept, and the snap adds half a frame
+  (`seconds = (len + 0.5) / fps`) because both the block math and the server TRUNCATE `seconds × fps` —
+  `61/30 = 2.0333` would round-trip back to 60 frames. Junctions are a hard cut (no crossfade); if a pop
+  shows up, slerp-blend ~3 frames each side.
+- **Compile-verified from the CLI** (see the `unity-cli-compile-check` memory); not yet exercised in the
+  Editor by the user. The repo's `Server/` copy needs re-syncing before the next push.
+
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +
@@ -265,12 +385,10 @@ Unity components:
   Mixamo mesh. Fine per the user; could scale/retarget the ghost if desired.
 - **Foot sliding** (treadmill) — no foot-lock yet; `footContacts` are in the payload → pin planted feet in
   retarget/bake. Not started.
-- **Timeline** — sequence prompt segments + per-frame constraints, the big feature the user wants next. **Decision
-  made (2026-07-27):** build a **custom dockable Kimodo window** as the sequencer (connection + timeline + Generate),
-  keeping the per-character constraint **components** for the Scene authoring — NOT Unity's native Timeline (its
-  runtime Playables/binding model is a poor fit for an author-then-bake diffusion tool; a custom EditorWindow is the
-  standard Unity pattern here). Maps onto Kimodo's existing multi-prompt (periods + space-separated durations) +
-  frame-indexed constraints (server already `crop_move`s per segment), so it's mostly a Unity authoring layer.
+- **Timeline — BUILT (2026-07-29, see §7c), not yet Editor-tested.** Remaining ideas: per-segment
+  constraint filtering/colour-coding of keys by segment; box-select + multi-key drag; a transition-frames
+  control (`num_transition_frames` is still the server default 5); showing generation progress on the
+  track; and per-segment sampling overrides (steps/seed) if that ever proves useful.
 - **Per-joint constraint intensity (graded weight) is still NOT supported by the model.** `create_conditions` writes
   constrained joints into a **boolean** `motion_mask`; the only strength dial is the global `cfg_weight[1]`
   (`constraintWeight`). Binary joint *selection* now exists (pose-key activation → `_PartialFullBody`, see §7), which

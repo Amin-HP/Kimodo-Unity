@@ -242,6 +242,26 @@ namespace AminHP.KimodoBridge
             return wp != null ? wp.BuildRootConstraints() : null;
         }
 
+        /// <summary>Seed a key from the generated motion's own pose at its frame ("align to frame").
+        /// Returns false when there is no motion to read (caller can fall back to <see cref="SetIdlePose"/>).
+        /// Undo/dirty is the caller's job.</summary>
+        public bool AlignKeyToMotion(Key key)
+        {
+            var g = ResolvedGenerator;
+            var m = g != null ? g.Motion : null;
+            if (key == null || m == null || m.clips == null || m.clips.Count == 0) return false;
+            var clip = m.clips[Mathf.Clamp(g.clipIndex, 0, m.clips.Count - 1)];
+            int J = m.jointCount;
+            int f = Mathf.Clamp(key.frame, 0, m.frameCount - 1);
+            if (clip.localQuats == null || clip.localQuats.Length < (f + 1) * J * 4) return false;
+            key.localQuats = new float[J * 4];
+            Array.Copy(clip.localQuats, f * J * 4, key.localQuats, 0, J * 4);
+            key.root = new Vector3(clip.rootPositions[f * 3], clip.rootPositions[f * 3 + 1],
+                                   clip.rootPositions[f * 3 + 2]);
+            key.hasPose = true;
+            return true;
+        }
+
         /// <summary>Reset a key to a neutral idle (rest / T-pose) while keeping its frame + root (pinned
         /// position). A quick way to clear a pose before editing or regenerating.</summary>
         public void SetIdlePose(Key key)

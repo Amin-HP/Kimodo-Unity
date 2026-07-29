@@ -13,35 +13,11 @@ namespace AminHP.KimodoBridge.Editor
     {
         private KimodoGenerator Gen => (KimodoGenerator)target;
 
-        private float _previewSpeed = 1f;
-        private double _lastEditorTime;
-
         private static readonly string[] _rootBakeLabels = { "In place", "Travel" };
 
-        private void OnEnable()
-        {
-            EditorApplication.update += OnEditorUpdate;
-            _lastEditorTime = EditorApplication.timeSinceStartup;
-        }
-
-        private void OnDisable()
-        {
-            EditorApplication.update -= OnEditorUpdate;
-        }
-
-        private void OnEditorUpdate()
-        {
-            var g = target as KimodoGenerator;
-            if (g == null || !g.Playing || !g.IsPreviewBound) return;
-            double now = EditorApplication.timeSinceStartup;
-            float dt = (float)(now - _lastEditorTime);
-            _lastEditorTime = now;
-            float t = g.PreviewTime + dt * _previewSpeed;
-            if (!g.loop && t >= g.Duration) { t = g.Duration; g.Playing = false; }
-            g.SampleTime(t);
-            SceneView.RepaintAll();
-            Repaint();
-        }
+        // Playback itself is driven by KimodoPlayback (one clock for every UI); we just repaint.
+        private void OnEnable() => KimodoPlayback.Advanced += Repaint;
+        private void OnDisable() => KimodoPlayback.Advanced -= Repaint;
 
         public override void OnInspectorGUI()
         {
@@ -87,9 +63,31 @@ namespace AminHP.KimodoBridge.Editor
         private void DrawGenerate(KimodoGenerator g)
         {
             EditorGUILayout.LabelField("Generate", EditorStyles.boldLabel);
+
+            // Timeline file: when one is assigned it composes the prompt + durations below.
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUI.BeginChangeCheck();
+                var tl = (KimodoTimeline)EditorGUILayout.ObjectField(
+                    new GUIContent("Timeline", "Asset sequencing several prompt segments. Leave empty to use the single prompt below."),
+                    g.timeline, typeof(KimodoTimeline), false);
+                if (EditorGUI.EndChangeCheck()) { Undo.RecordObject(g, "Assign Kimodo timeline"); g.timeline = tl; }
+                if (GUILayout.Button(new GUIContent("Open ▸", "Open the Kimodo Timeline window on this character."), GUILayout.Width(60)))
+                    KimodoTimelineWindow.OpenFor(g);
+            }
+
+            bool tlDrives = g.UsingTimeline;
+            if (tlDrives)
+                EditorGUILayout.HelpBox("Driven by the timeline file: " + g.EffectivePrompt +
+                                        "\nduration = \"" + g.EffectiveDuration + "\"", MessageType.None);
+
             EditorGUI.BeginChangeCheck();
-            string prompt = EditorGUILayout.TextArea(g.prompt, GUILayout.MinHeight(44));
-            string duration = EditorGUILayout.TextField(new GUIContent("Duration (s)", "Seconds; space-separated for one per segment."), g.duration);
+            string prompt = g.prompt; string duration = g.duration;
+            using (new EditorGUI.DisabledScope(tlDrives))
+            {
+                prompt = EditorGUILayout.TextArea(g.prompt, GUILayout.MinHeight(44));
+                duration = EditorGUILayout.TextField(new GUIContent("Duration (s)", "Seconds; space-separated for one per segment."), g.duration);
+            }
             int numSamples = EditorGUILayout.IntSlider("Samples", g.numSamples, 1, 8);
             int steps = EditorGUILayout.IntSlider("Diffusion steps", g.diffusionSteps, 10, 200);
             bool useSeed, postprocess;
@@ -145,10 +143,7 @@ namespace AminHP.KimodoBridge.Editor
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button(g.Playing ? "❚❚ Pause" : "▶ Play", GUILayout.Height(24)))
-                    {
-                        g.Playing = !g.Playing;
-                        _lastEditorTime = EditorApplication.timeSinceStartup;
-                    }
+                        KimodoPlayback.Toggle(g);
                     if (GUILayout.Button("⏮ Restart", GUILayout.Height(24), GUILayout.Width(90)))
                         g.SampleTime(0f);
                     EditorGUI.BeginChangeCheck();
@@ -158,11 +153,11 @@ namespace AminHP.KimodoBridge.Editor
 
                 float dur = g.Duration;
                 EditorGUI.BeginChangeCheck();
-                float t = EditorGUILayout.Slider(g.PreviewTime, 0f, Mathf.Max(0.0001f, dur));
-                if (EditorGUI.EndChangeCheck()) { g.Playing = false; g.SampleTime(t); }
+                float t = EditorGUILayout.Slider(Mathf.Clamp(g.PreviewTime, 0f, dur), 0f, Mathf.Max(0.0001f, dur));
+                if (EditorGUI.EndChangeCheck()) { KimodoPlayback.SetPlaying(g, false); g.SampleTime(t); }
                 EditorGUILayout.LabelField($"t = {g.PreviewTime:0.00}s / {dur:0.00}s  ·  frame {g.CurrentFrame} / {g.FrameCount - 1}", EditorStyles.miniLabel);
 
-                _previewSpeed = EditorGUILayout.Slider("Speed", _previewSpeed, 0.1f, 3f);
+                g.PlaybackSpeed = EditorGUILayout.Slider("Speed", g.PlaybackSpeed, 0.1f, 3f);
 
                 EditorGUI.BeginChangeCheck();
                 float scale = EditorGUILayout.FloatField(

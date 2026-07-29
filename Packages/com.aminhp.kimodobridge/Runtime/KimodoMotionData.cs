@@ -87,6 +87,8 @@ namespace AminHP.KimodoBridge
         public int diffusion_steps = 100;
         public int num_transition_frames = 5;
         public float[] cfg_weight;         // [text_weight, constraint_weight]; higher constraint = stronger pins
+        public float[] segment_cfg_weights;// optional: one constraint weight per prompt segment, overriding
+                                           // cfg_weight[1] for that segment (null/empty = same weight throughout)
         public int seed = -1;              // -1 => omit (see KimodoClient serialization)
         public bool postprocess = true;
         public bool include_positions = false;

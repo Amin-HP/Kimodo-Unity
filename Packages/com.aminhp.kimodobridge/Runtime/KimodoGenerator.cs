@@ -24,10 +24,14 @@ namespace AminHP.KimodoBridge
         public Animator target;
 
         [Header("Prompt")]
-        [Tooltip("Motion prompt. Periods separate sequential segments.")]
+        [Tooltip("Timeline asset driving this character. When assigned, its segments compose the prompt " +
+                 "and durations below (edit it in Window ▸ Kimodo ▸ Timeline).")]
+        public KimodoTimeline timeline;
+
+        [Tooltip("Motion prompt. Periods separate sequential segments. Ignored while a timeline is assigned.")]
         [TextArea(2, 5)] public string prompt = "A person walks forward.";
 
-        [Tooltip("Seconds. Space-separated to give one duration per segment.")]
+        [Tooltip("Seconds. Space-separated to give one duration per segment. Ignored while a timeline is assigned.")]
         public string duration = "4.0";
 
         [Header("Sampling")]
@@ -56,12 +60,22 @@ namespace AminHP.KimodoBridge
         [NonSerialized] public string Info = "";
         [NonSerialized] public float PreviewTime;   // shared with the editors (playback head)
         [NonSerialized] public bool Playing;
+        [NonSerialized] public float PlaybackSpeed = 1f;   // editor playback rate (see KimodoPlayback)
 
         public Animator ResolvedTarget => target != null ? target : (target = GetComponent<Animator>());
         public KimodoBridge ResolvedBridge => bridge != null ? bridge : (bridge = FindBridge());
 
         public int FrameCount => Motion != null ? Motion.frameCount : 0;
         public float Fps => Motion != null ? Motion.fps : 30f;
+
+        /// <summary>True when a timeline asset with at least one usable segment drives this character.</summary>
+        public bool UsingTimeline => timeline != null && timeline.HasContent;
+
+        /// <summary>The prompt actually sent: composed from the timeline when there is one.</summary>
+        public string EffectivePrompt => UsingTimeline ? timeline.BuildPrompt() : prompt;
+
+        /// <summary>The duration string actually sent: one value per timeline segment when there is one.</summary>
+        public string EffectiveDuration => UsingTimeline ? timeline.BuildDuration() : duration;
 
         /// <summary>Bones-only skeleton fetched by the bridge on connect (for pre-generation authoring).</summary>
         public KimodoMotion Skeleton => ResolvedBridge != null ? ResolvedBridge.Skeleton : null;
@@ -81,7 +95,7 @@ namespace AminHP.KimodoBridge
             {
                 float fps = Skeleton != null && Skeleton.fps > 0f ? Skeleton.fps : 30f;
                 float secs = 0f;
-                foreach (var part in (duration ?? "").Split(' '))
+                foreach (var part in (EffectiveDuration ?? "").Split(' '))
                     if (float.TryParse(part, System.Globalization.NumberStyles.Float,
                                        System.Globalization.CultureInfo.InvariantCulture, out var s)) secs += s;
                 if (secs <= 0f) secs = 4f;
@@ -89,8 +103,13 @@ namespace AminHP.KimodoBridge
             }
         }
 
-        /// <summary>Frame count to author against: the real motion's, or the estimate before first generate.</summary>
-        public int AuthoringFrameCount => Motion != null ? Motion.frameCount : EstimatedFrameCount;
+        /// <summary>Frame count to author against — i.e. what the NEXT Generate will produce. With a
+        /// timeline that is its own segment math (which mirrors the server's int(seconds × fps) per
+        /// segment), so retiming a segment moves the authoring axis immediately instead of waiting for
+        /// a regenerate; otherwise the current motion's length, or the estimate before the first one.</summary>
+        public int AuthoringFrameCount =>
+            UsingTimeline ? timeline.TotalFrames(Fps)
+                          : (Motion != null ? Motion.frameCount : EstimatedFrameCount);
         public float Duration => Preview != null ? Preview.Duration : (FrameCount / Mathf.Max(1f, Fps));
 
         /// <summary>Preview frame currently under the playback head.</summary>
@@ -124,13 +143,21 @@ namespace AminHP.KimodoBridge
             var pc = GetComponent<KimodoPoseConstraints>();
             if (pc != null) { var l = pc.BuildConstraints(); if (l != null) built.AddRange(l); }
 
+            // Frozen timeline segments: steer the model toward the content we are keeping, so what is
+            // generated around them flows in and out of it (the exact frames are spliced back below).
+            if (UsingTimeline && PoseSkeleton != null)
+            {
+                var fz = timeline.BuildFrozenConstraints(Fps, AuthoringFrameCount, PoseSkeleton.jointCount);
+                if (fz != null) built.AddRange(fz);
+            }
+
             Busy = true;
             Info = "Requesting…";
             var req = new KimodoGenerateRequest
             {
-                prompt = prompt,
+                prompt = EffectivePrompt,
                 model = b.model,
-                duration = duration,
+                duration = EffectiveDuration,
                 num_samples = numSamples,
                 diffusion_steps = diffusionSteps,
                 seed = useSeed ? seed : -1,
@@ -139,6 +166,9 @@ namespace AminHP.KimodoBridge
                 constraints = built.Count > 0 ? built : null,
                 // Only override the constraint guidance weight when we actually send constraints.
                 cfg_weight = built.Count > 0 ? new[] { 2f, constraintWeight } : null,
+                // Timeline segments may each ask for their own constraint strength.
+                segment_cfg_weights = built.Count > 0 && UsingTimeline
+                    ? timeline.BuildSegmentConstraintWeights(constraintWeight) : null,
             };
             b.GetClient().Generate(req, (ok, motion, err) =>
             {
@@ -150,6 +180,7 @@ namespace AminHP.KimodoBridge
                     onDone?.Invoke();
                     return;
                 }
+                ApplyFrozenSegments(motion);
                 Motion = motion;
                 clipIndex = 0;
                 PreviewTime = 0f;
@@ -158,6 +189,33 @@ namespace AminHP.KimodoBridge
                 RebindPreview();
                 onDone?.Invoke();
             });
+        }
+
+        /// <summary>Put every frozen segment's kept frames back into a freshly generated motion, so a
+        /// frozen segment returns EXACTLY as it was — the constraint only steers the model near it.
+        /// Applied to every sample so all of them share the frozen part.</summary>
+        private void ApplyFrozenSegments(KimodoMotion motion)
+        {
+            if (motion == null || motion.clips == null || !UsingTimeline) return;
+            float fps = motion.fps > 0f ? motion.fps : 30f;
+            int J = motion.jointCount;
+
+            for (int i = 0; i < timeline.SegmentCount; i++)
+            {
+                var s = timeline.segments[i];
+                if (s == null || !s.HasFrozenContent || s.frozenClip.jointCount != J) continue;
+                int start = timeline.StartFrame(i, fps);
+                int len = Mathf.Min(s.frozenClip.frameCount, motion.frameCount - start);
+                if (start < 0 || len <= 0) continue;
+
+                foreach (var clip in motion.clips)
+                {
+                    if (clip.localQuats != null && clip.localQuats.Length >= (start + len) * J * 4)
+                        Array.Copy(s.frozenClip.localQuats, 0, clip.localQuats, start * J * 4, len * J * 4);
+                    if (clip.rootPositions != null && clip.rootPositions.Length >= (start + len) * 3)
+                        Array.Copy(s.frozenClip.rootPositions, 0, clip.rootPositions, start * 3, len * 3);
+                }
+            }
         }
 
         /// <summary>(Re)build the retarget preview for the current motion + target. Auto-fits root scale.</summary>
