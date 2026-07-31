@@ -120,3 +120,7 @@ InitTestScene*.unity*
 # Unity crash-recovery scene copies
 /[Aa]ssets/_[Rr]ecovery/
 /[Aa]ssets/_[Rr]ecovery.meta
+
+# Python bytecode from running the bundled server
+__pycache__/
+*.pyc
