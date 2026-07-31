@@ -116,3 +116,7 @@ InitTestScene*.unity*
 /[Aa]ssets/A.anim.meta
 /[Aa]ssets/B.anim
 /[Aa]ssets/B.anim.meta
+
+# Unity crash-recovery scene copies
+/[Aa]ssets/_[Rr]ecovery/
+/[Aa]ssets/_[Rr]ecovery.meta

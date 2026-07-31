@@ -39,8 +39,17 @@ namespace AminHP.KimodoBridge.Editor
             public int activeSig = int.MinValue;               // last applied activation signature
         }
 
-        private readonly Dictionary<KimodoPoseConstraints.Key, Ghost> _ghosts =
-            new Dictionary<KimodoPoseConstraints.Key, Ghost>();
+        /// <summary>One pose to ghost. <c>owner</c> only identifies the ghost across frames (the key
+        /// object it came from), so pose keys and hand/foot keys can both be ghosted.</summary>
+        public struct PoseView
+        {
+            public object owner;
+            public float[] localQuats;   // Kimodo local rotations, J*4
+            public Vector3 root;         // Kimodo pelvis position
+            public bool[] jointActive;   // optional per-joint fade mask (null = fully opaque)
+        }
+
+        private readonly Dictionary<object, Ghost> _ghosts = new Dictionary<object, Ghost>();
         private Material _mat;
         private GameObject _sourceRef;   // character we cloned from
         private KimodoMotion _motionRef; // motion the ghost players are bound to
@@ -64,13 +73,14 @@ namespace AminHP.KimodoBridge.Editor
             }
         }
 
-        /// <summary>Ensure a posed ghost exists for every shown key; remove the rest. Call each OnSceneGUI.</summary>
-        public void Sync(KimodoPoseConstraints pc, KimodoGenerator g)
+        /// <summary>Ensure a posed ghost exists for every given pose; remove the rest. Call each
+        /// OnSceneGUI. Any editor can drive this (pose keys, hand/foot keys, …).</summary>
+        public void Sync(KimodoGenerator g, float opacity, IList<PoseView> views)
         {
             if (!_swept) { SweepOrphans(); _swept = true; }
             var tgt = g != null ? g.ResolvedTarget : null;
             var sk = g != null ? g.PoseSkeleton : null;   // real motion, or the rest skeleton pre-generation
-            if (pc == null || g == null || sk == null || tgt == null || !pc.showGhostMesh || Mat == null)
+            if (g == null || sk == null || tgt == null || views == null || Mat == null)
             {
                 DestroyAll();
                 return;
@@ -80,36 +90,36 @@ namespace AminHP.KimodoBridge.Editor
             if (_sourceRef != srcGo || _motionRef != sk) { DestroyAll(); _sourceRef = srcGo; _motionRef = sk; }
 
             // White ghost, opacity from the slider.
-            Mat.SetColor("_BaseColor", new Color(1f, 1f, 1f, Mathf.Clamp01(pc.ghostOpacity)));
+            Mat.SetColor("_BaseColor", new Color(1f, 1f, 1f, Mathf.Clamp01(opacity)));
 
             int need = sk.jointCount * 4;
 
-            // Drop ghosts whose key was removed or hidden.
-            var stale = new List<KimodoPoseConstraints.Key>();
-            foreach (var kv in _ghosts)
-                if (!pc.keys.Contains(kv.Key) || !kv.Key.show)
-                    stale.Add(kv.Key);
+            // Drop ghosts whose pose is no longer in the list.
+            var live = new HashSet<object>();
+            foreach (var v in views) if (v.owner != null) live.Add(v.owner);
+            var stale = new List<object>();
+            foreach (var kv in _ghosts) if (!live.Contains(kv.Key)) stale.Add(kv.Key);
             foreach (var k in stale) { Destroy(_ghosts[k]); _ghosts.Remove(k); }
 
-            // Ensure + pose a ghost per shown key.
-            foreach (var k in pc.keys)
+            // Ensure + pose a ghost per view.
+            foreach (var v in views)
             {
-                if (!k.show || k.localQuats == null || k.localQuats.Length != need) continue;
-                if (!_ghosts.TryGetValue(k, out var ghost) || ghost.go == null)
+                if (v.owner == null || v.localQuats == null || v.localQuats.Length != need) continue;
+                if (!_ghosts.TryGetValue(v.owner, out var ghost) || ghost.go == null)
                 {
                     ghost = Create(srcGo, sk);
                     if (ghost == null) continue;
-                    _ghosts[k] = ghost;
+                    _ghosts[v.owner] = ghost;
                 }
                 // Match the live character's placement, then pose (root travel scaled like the preview).
                 ghost.go.transform.SetPositionAndRotation(srcGo.transform.position, srcGo.transform.rotation);
                 ghost.go.transform.localScale = srcGo.transform.lossyScale;
                 ghost.player.RootMotionScale = g.rootMotionScale;
-                ghost.player.PoseFromLocal(k.localQuats, k.root);
+                ghost.player.PoseFromLocal(v.localQuats, v.root);
 
                 // Refresh the fade mask only when the activation changed.
-                int sig = ActiveSig(k);
-                if (ghost.activeSig != sig) { ApplyActivation(ghost, k, sk); ghost.activeSig = sig; }
+                int sig = ActiveSig(v.jointActive);
+                if (ghost.activeSig != sig) { ApplyActivation(ghost, v.jointActive, sk); ghost.activeSig = sig; }
             }
         }
 
@@ -172,27 +182,34 @@ namespace AminHP.KimodoBridge.Editor
 
         // ---- activation / fade -------------------------------------------------------------
 
-        private static int ActiveSig(KimodoPoseConstraints.Key k)
+        private static int ActiveSig(bool[] jointActive)
         {
-            if (k.jointActive == null) return 0;
+            if (jointActive == null) return 0;
             int h = 17;
-            for (int i = 0; i < k.jointActive.Length; i++) h = h * 31 + (k.jointActive[i] ? 1 : 0);
+            for (int i = 0; i < jointActive.Length; i++) h = h * 31 + (jointActive[i] ? 1 : 0);
             return h;
         }
 
-        // Write each vertex's opacity = skin-weighted average of its bones' active flags.
-        private static void ApplyActivation(Ghost gh, KimodoPoseConstraints.Key key, KimodoMotion motion)
+        private static bool AllActive(bool[] jointActive)
         {
-            bool allActive = !KimodoPoseConstraints.HasInactive(key);
+            if (jointActive == null) return true;
+            for (int i = 0; i < jointActive.Length; i++) if (!jointActive[i]) return false;
+            return true;
+        }
+
+        // Write each vertex's opacity = skin-weighted average of its bones' active flags.
+        private static void ApplyActivation(Ghost gh, bool[] jointActive, KimodoMotion motion)
+        {
+            bool allActive = AllActive(jointActive);
 
             // SOMA joint active flags -> per-HumanBodyBones active (via the SOMA->Human map).
             Dictionary<HumanBodyBones, float> activeHbb = null;
-            if (!allActive && key.jointActive != null)
+            if (!allActive)
             {
                 activeHbb = new Dictionary<HumanBodyBones, float>();
-                for (int j = 0; j < motion.bones.Count && j < key.jointActive.Length; j++)
+                for (int j = 0; j < motion.bones.Count && j < jointActive.Length; j++)
                     if (KimodoSomaHumanoid.SomaToHuman.TryGetValue(motion.bones[j].name, out var hbb))
-                        activeHbb[hbb] = key.jointActive[j] ? 1f : 0f;
+                        activeHbb[hbb] = jointActive[j] ? 1f : 0f;
             }
 
             // Clone bone transform -> HumanBodyBones (to resolve each skin bone's active flag).

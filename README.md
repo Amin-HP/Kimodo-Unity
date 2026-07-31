@@ -47,12 +47,17 @@ Full usage, constraints, and the runtime API are in the
   its own duration, in a **Kimodo Timeline** asset you assign to the character. One frame axis carries the
   segments plus every constraint key (waypoints / effectors / pose keys): drag a segment edge to retime,
   drag keys to move them, split / duplicate / reorder, and Generate + Bake from the same window.
-  Per-segment **constraint weight** lets one beat pin harder than the next.
+  Per-segment **constraint weight** lets one beat pin harder than the next, and **❄ freezing** a
+  segment keeps it exactly as generated — Generate then skips it and only requests the rest.
 - **Constraints**, authored with Scene-view gizmos and sent as soft diffusion guidance:
   - **Waypoints** — ground root path (X/Z) + per-waypoint facing.
-  - **Effectors** — per-frame hand / foot targets via full-body IK.
-  - **Pose keys** — whole-body poses with a ghost skeleton + optional transparent **ghost mesh**, and a
-    pelvis handle to move a pose (including **height**, e.g. onto a box).
+  - **End-Effectors** — per-frame hand / foot keyframes, like the demo's: a whole-body pose of which only
+    the ticked limbs (and the root) are pinned, one key per frame. The ghost shows the constrained joints
+    in red with an axes gizmo on each effector.
+  - **Full-Body pose keys** — whole-body poses with a ghost skeleton + optional transparent **ghost mesh**,
+    and a pelvis handle to move a pose (including **height**, e.g. onto a box).
+  - The editing tools (drag a limb, aim it, rotate joints, move the pose) sit in a dockable **Scene-view
+    overlay**, and the key you edit follows the playhead — or a click on its Timeline key.
 - **Auto root-motion scale** that absorbs per-character unit/scale differences.
 
 ## Repo layout

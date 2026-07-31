@@ -123,6 +123,7 @@ namespace AminHP.KimodoBridge.Editor
                 if (wp.frame == g.CurrentFrame) return; // one per frame
             Undo.RecordObject(w, "Add waypoint");
             w.waypoints.Add(new KimodoWaypoints.Waypoint { frame = g.CurrentFrame, world = pos });
+            KimodoEditState.Select(w, w.waypoints.Count - 1);
         }
 
         // ---------------------------------------------------------------
@@ -151,9 +152,15 @@ namespace AminHP.KimodoBridge.Editor
             // Authored pathway: connect waypoints in frame order (the route the user is drawing).
             DrawAuthoredPathway(w);
 
+            // Waypoints keep their own combined gizmo — ground dot to move, arrow tip to aim — always
+            // live on every waypoint. No tool modes: this is the part that already worked well.
+            KimodoEditState.ResolveFollow(g);
+            int selIndex = KimodoEditState.IndexFor(w, w.waypoints.Count);
+
             for (int i = 0; i < w.waypoints.Count; i++)
             {
                 var wp = w.waypoints[i];
+                bool selected = i == selIndex;
                 Vector3 groundPos = w.OnGround(wp.world);
                 float size = HandleUtility.GetHandleSize(groundPos);
 
@@ -183,6 +190,7 @@ namespace AminHP.KimodoBridge.Editor
                     Vector3 nd = newTip - groundPos; nd.y = 0f;
                     if (nd.sqrMagnitude > 1e-6f)
                     {
+                        KimodoEditState.Select(w, i);
                         Undo.RecordObject(w, "Aim waypoint");
                         wp.headingDeg = Vector3.SignedAngle(Vector3.forward, nd.normalized, Vector3.up);
                         wp.constrainFacing = true;
@@ -206,13 +214,15 @@ namespace AminHP.KimodoBridge.Editor
                 }
 
                 // Ground grab: a single dot that moves the waypoint on the X/Z plane only (no Y axis,
-                // no 3-axis gizmo). Yaw is set by the arrow-tip handle above.
-                Handles.color = WpColor;
+                // no 3-axis gizmo). Yaw is set by the arrow-tip handle above. Under the Face tool it
+                // becomes a plain dot that selects the waypoint instead.
+                Handles.color = selected ? Color.yellow : WpColor;
                 EditorGUI.BeginChangeCheck();
                 Vector3 moved = Handles.Slider2D(groundPos, Vector3.up, Vector3.right, Vector3.forward,
                     size * 0.16f, Handles.SphereHandleCap, Vector2.zero);
                 if (EditorGUI.EndChangeCheck())
                 {
+                    KimodoEditState.Select(w, i);
                     Undo.RecordObject(w, "Move waypoint");
                     wp.world = new Vector3(moved.x, wp.world.y, moved.z);  // keep the waypoint's own Y
                     EditorUtility.SetDirty(w);

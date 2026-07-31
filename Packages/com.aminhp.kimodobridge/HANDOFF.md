@@ -5,10 +5,13 @@
 > `C:\Users\mahag\.claude\projects\h--kimodo\memory\` (`kimodo-unity-bridge.md` — detailed running log,
 > `kimodo-setup.md` — how Kimodo is installed).
 
-Last updated: 2026-07-29. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
+Last updated: 2026-07-31. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
 Published: **https://github.com/Amin-HP/Kimodo-Unity** (branch `main`, currently private). The repo bundles a
 copy of the Python server under `Server/` — **re-sync it from the live `H:\kimodo\kimodo\kimodo_bridge\server.py`
 before each push** (see the `kimodo-github-repo` memory).
+
+**Read §7e–§7i first if you are picking this up now**: the constraint system, its editing UX and the
+freeze feature were all reworked on 2026-07-31, and the older sections describe what came before.
 
 ---
 
@@ -19,8 +22,9 @@ A real-time, interactive add-on that connects **NVIDIA Kimodo** (text→human-mo
 **constraints** (root path, hand/foot targets, whole-body poses), and **bake** to an `AnimationClip`.
 Uses the **SOMA** model by default (77 joints); model is user-selectable.
 
-**Status: fully working** end-to-end — connect → generate → preview → constraints (waypoints, effectors,
-pose) → bake. All confirmed by the user in-editor.
+**Status: fully working** end-to-end — connect → generate → preview → constraints (waypoints,
+end-effectors, pose) → timeline with frozen segments → bake. Confirmed by the user in-editor, including
+the reworked hand/foot keys, the Scene-view tool overlay and partial generation of frozen timelines.
 
 ---
 
@@ -33,12 +37,12 @@ pose) → bake. All confirmed by the user in-editor.
 2. **Unity:** open `H:\kimodo\Kimodo Unity` (Unity 6000.4.4f1, URP). Component workflow:
    - `GameObject ▸ Kimodo ▸ Bridge Manager` — creates the **KimodoBridge** manager.
    - Select a **Humanoid** character (Rig → Humanoid; tested with a stock Mixamo model) →
-     `GameObject ▸ Kimodo ▸ Set Up Selected Character` — adds **KimodoGenerator** + **KimodoEffectors**,
+     `GameObject ▸ Kimodo ▸ Set Up Selected Character` — adds **KimodoGenerator** + **KimodoEndEffectors**,
      wires the bridge.
    - On KimodoBridge: **Connect** (preloads the model). On KimodoGenerator: prompt → **Generate** →
      preview (play/scrub) → **Bake to AnimationClip**.
    - Add constraint components as needed (`GameObject ▸ Kimodo` or Add Component): **KimodoWaypoints**,
-     **KimodoEffectors**, **KimodoPoseConstraints** — each draws Scene gizmos and is gathered on Generate.
+     **KimodoEndEffectors**, **KimodoPoseConstraints** — each draws Scene gizmos and is gathered on Generate.
 
 ---
 
@@ -86,21 +90,31 @@ Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`*
   prompt `Segment`s (`prompt` + `seconds`), `BuildPrompt()`/`BuildDuration()` (the multi-prompt encoding),
   frame math (`StartFrame`/`FrameCountOf`/`TotalFrames`/`SegmentAtFrame`), and a saved `Take` (see §7c).
 - `KimodoMotionPlayer.cs` — runtime component to play a `KimodoMotion` from code.
+- `KimodoMotionCache.cs` — keeps the generated motion in `Library/KimodoMotionCache/` so a compile,
+  play mode or a restart does not lose it (§7i).
 - `KimodoGhost.shader` — `"Kimodo/GhostMesh"`, URP transparent fresnel used by the pose ghost-mesh preview.
 - **Components:** `KimodoBridge.cs` (manager), `KimodoGenerator.cs` (per-character generate+preview+bake state),
-  `KimodoEffectors.cs` (hand/foot IK targets), `KimodoWaypoints.cs` (root path + facing),
+  `KimodoEndEffectors.cs` (hand/foot keys — a pose + a limb mask, §7e), `KimodoWaypoints.cs` (root path + facing),
   `KimodoPoseConstraints.cs` (whole-body pose keys).
 
 **Editor**
 - `KimodoBaker.cs` — bake `KimodoMotion` → Humanoid `AnimationClip` (RootT/RootQ + muscle curves).
-- `KimodoBridgeEditor.cs`, `KimodoGeneratorEditor.cs`, `KimodoEffectorsEditor.cs`, `KimodoWaypointsEditor.cs`,
+- `KimodoBridgeEditor.cs`, `KimodoGeneratorEditor.cs`, `KimodoEndEffectorsEditor.cs`, `KimodoWaypointsEditor.cs`,
   `KimodoPoseConstraintsEditor.cs` — custom inspectors + Scene gizmos.
 - `KimodoTimelineWindow.cs` — the sequencer window (`Window ▸ Kimodo ▸ Timeline`), see §7c.
-- `KimodoPoseGhosts.cs` — manages the transparent ghost-mesh clones for the pose-constraint editor (see §7).
+- `KimodoPoseGhosts.cs` — transparent ghost-mesh clones for any posed key (`Sync(generator, opacity, views)`).
+- `KimodoEditState.cs` — **static** tool + key selection shared by the overlay, the inspectors and the
+  Timeline window (see §7f — this must never move back onto an editor instance).
+- `KimodoConstraintOverlay.cs` — the Scene-view **Overlay** with the editing tools + key navigation (§7f).
+- `KimodoMotionRestore.cs` — `[InitializeOnLoad]`; puts each character's cached motion back after a
+  domain reload or a scene open (§7i).
 - `KimodoMenu.cs` — the `GameObject ▸ Kimodo ▸ …` menu items.
   (The legacy all-in-one `KimodoBridgeWindow.cs` was **removed** in the v0.1.0 cleanup — component workflow only.)
 
 ### Example (outside the package) — `H:\kimodo\Kimodo Unity\Assets\`
+`KimodoRailAuthor.cs` is an abstract base holding everything the shapes share (rail sampling, arm fit,
+pose building, gizmo chrome, context menus) with four abstract members for the path shape;
+`KimodoLineWaypoints.cs` is the straight version (open rail: clamps at its ends, `railOverhang`).
 - `KimodoCircleWaypoints.cs` — a user-side script (namespace-less, `using AminHP.KimodoBridge`) showing how to drive
   the plugin from your own code: builds a **circular loop** of waypoints (center/radius/resolution, closeLoop makes
   first==last exactly, `facingOffsetDeg` e.g. ±90 to look at the centre, `startAtCharacter`), can **duplicate the
@@ -125,9 +139,11 @@ seed(-1=random), postprocess, include_positions, cfg_weight:[text,constraint], c
 **`KimodoConstraint`** (Unity→server, Kimodo coords) carries whatever a kind needs:
 - `type`: `left-hand|right-hand|left-foot|right-foot|fullbody|root2d`.
 - `frameIndices[N]`.
-- pose-based (fullbody, IK'd effectors): `localQuats[N*J*4 wxyz]`, `rootPositions[N*3]`.
+- pose-based (fullbody **and** hand/foot keys): `localQuats[N*J*4 wxyz]`, `rootPositions[N*3]`.
 - `activeJoints[]` (fullbody only): active BODY-joint names → server pins only those (partial pose). Omit = all.
-- direct effector target (unused now — see IK below): `effectorPos[N*3]`, `effectorRot[N*4]`, `effectorRootXZ[N*2]`, `constrainRot`.
+- `freeRoot` (hand/foot only): `false` (default) = the demo's behaviour, the pose's root ground position,
+  height and facing are pinned with the limb; `true` = pin the limb + ground position only. See §7e.
+- direct effector target (**no longer sent** — see §7e): `effectorPos[N*3]`, `effectorRot[N*4]`, `effectorRootXZ[N*2]`, `constrainRot`.
 - root path: `rootPath2d[N*2 xz]`, optional `rootHeading2d[N*2 cos,sin]`.
 - (legacy pin offsets: `targetOffsets`, `jointNames`.)
 
@@ -153,23 +169,27 @@ seed(-1=random), postprocess, include_positions, cfg_weight:[text,constraint], c
   `crop_move` rebuilds `pos_indices` on CPU, so moving `frame_indices` to cuda causes a device mismatch in
   `create_pairs`. Keep index tensors on CPU (data goes on cuda via `from_dict`).
 - **Perf:** `_get_or_load_model` must hit the cache; reloading re-loads the ~8B text encoder each call.
-- **The affine `KimodoRootMap`** cleanly inverts world↔Kimodo for the **root/positions** (proven by waypoints), but
-  a hand/foot's *height* is set by leg/arm length + muscle retarget, so it is **not** a clean affine → effector Y
-  needs a measured per-effector vertical fit (see `KimodoEffectors.FitVerticalY`).
+- **The affine `KimodoRootMap`** cleanly inverts world↔Kimodo for the **root/positions** (proven by
+  waypoints), but a hand/foot's *height* is set by leg/arm length + muscle retarget, so it is **not** a
+  clean affine. The old code measured a per-effector vertical fit to work around that (`FitVerticalY`,
+  now deleted). The lesson that replaced it: **do not map a hand/foot position through an affine at all**
+  — author it on a pose and read the effector off that pose's FK, so only the root ever goes through the
+  mapping (§7e).
 
 ---
 
 ## 7. Constraint system (current, all working)
 
-Server: `KimodoGenerator.Generate()` gathers constraints from `KimodoEffectors` + `KimodoWaypoints` +
+Server: `KimodoGenerator.Generate()` gathers constraints from `KimodoEndEffectors` + `KimodoWaypoints` +
 `KimodoPoseConstraints` and sends them. `server.py`:
 - `_build_constraint_dicts()` routes by type: **root2d** → `smooth_root_2d` (+ optional `global_root_heading` from
-  `rootHeading2d`); **effector with `effectorPos`** → a `_target` dict (single-joint); **else pose path** (fullbody
-  and IK'd effectors) → `localQuats`→axis-angle + root.
-- `_load_constraints()`: effector pins use **position-only** subclasses (`_LeftFootPO` etc., via
-  `_ee_position_only_update`) that constrain the effector position + rotation + `smooth_root_2d` but **drop
-  `root_y_pos` + `global_root_heading`** (so the body can rise/turn to reach). Direct targets use
-  `_SingleJointTarget`. `root2d`/`fullbody` use the stock classes. `_apply_target_offsets` shifts pinned positions.
+  `rootHeading2d`); **effector with `effectorPos`** → a `_target` dict (single-joint, legacy/unused); **else pose
+  path** (fullbody and hand/foot keys) → `localQuats`→axis-angle + root, plus `_free_root` when the key asked for it.
+- `_load_constraints()`: **stock Kimodo classes by default** (what the demo uses). A hand/foot key with
+  `_free_root` instead uses the position-only subclasses (`_LeftFootPO` etc., via `_ee_position_only_update`)
+  which constrain the effector position + rotation + `smooth_root_2d` but **drop `root_y_pos` +
+  `global_root_heading`**, so the body can rise/turn to reach. A `fullbody` with `active_joint_names` uses
+  `_PartialFullBody`; direct targets use `_SingleJointTarget`. `_apply_target_offsets` shifts pinned positions.
 - `create_conditions` skips absent channels, so dropping root height/heading is safe.
 
 Unity components:
@@ -177,10 +197,7 @@ Unity components:
   `global_root_heading`). Editor draws the pelvis path + waypoint discs + facing arrows (no text labels; `markerRadius`
   is display-only and does NOT affect the constraint — only `world` position + optional facing do). **Works well** —
   this is the reference for "the affine mapping is correct."
-- **KimodoEffectors** (hand/foot) — world targets (position + optional rotation) per frame. **Full-body IK**: takes
-  the current pose, two-bone-IKs the leg/arm to reach the target (steps the body/root when out of reach), sends the
-  resulting **pose** as a position-only effector constraint. Gizmos = position + rotation handle, kind dropdown,
-  "Snap to bone". Y uses `FitVerticalY`. (`effectorPos`/rotation-gizmo path exists but IK-pose path is what's used.)
+- **KimodoEndEffectors** (hand/foot) — **rewritten 2026-07-31 to match the demo**; see §7e.
 - **KimodoPoseConstraints** (whole rig / fullbody) — each key is an editable **ghost skeleton** drawn at its frame
   (FK of the stored pose → `KimodoRootMap.KimodoToWorld`; no character posing). **Default Show on**, multiple keys
   visible at once. Select a key (◉), click a body-joint dot, rotate it (world gizmo → Kimodo local via
@@ -271,7 +288,7 @@ Playables/binding model is a poor fit for an author-then-bake diffusion tool).
   (fully backwards-compatible). `EstimatedFrameCount` reads `EffectiveDuration`, so the frame axis and all
   the "Add @ frame" authoring work **before** the first generate.
 - **Where the keys live:** the constraint keys stay on the scene components (`KimodoWaypoints` /
-  `KimodoEffectors` / `KimodoPoseConstraints`) — they hold world positions and draw Scene gizmos, so the
+  `KimodoEndEffectors` / `KimodoPoseConstraints`) — they hold world positions and draw Scene gizmos, so the
   scene is their home. The window is a second view onto the same data as the inspectors; edits from either
   side agree. `Take ▸ Save/Load` copies them in and out of the asset (`KimodoTimeline.CaptureTake` /
   `ApplyTake`) when you want the whole shot in one file; Load **replaces** the character's keys.
@@ -349,46 +366,259 @@ Playables/binding model is a poor fit for an author-then-bake diffusion tool).
   sent when there are constraints at all. Shim verified standalone (weights applied in order, `_generate`
   restored afterwards, overflow falls back).
 - **FROZEN SEGMENTS — PARKED / HIDDEN (2026-07-29, user's call: "I want to add it in the future, but I
-  just want to hide it").** The switch is **`KimodoTimeline.FreezeEnabled` (`static readonly bool`, false)**
-  — flip that one field to bring the whole feature back. While it is false the ❄ tool button, the frozen
-  info box, "Re-capture from current motion" and the context-menu Freeze entry are all hidden, and
-  `Segment.HasFrozenContent` returns false so a segment left `frozen` in an existing asset is generated
-  normally and can still be retimed (no way to get stuck frozen with no UI to release it). Everything the
-  feature needs is still in the code, untouched: `Segment.frozen`/`frozenClip`, `FrozenClip`,
-  `FreezeSegment`, `BuildFrozenConstraints`, `KimodoGenerator.ApplyFrozenSegments`, and the window's
-  `ToggleFreeze`/`RecaptureFreeze`/`Frozen(seg)`. `static readonly` rather than `const` on purpose: a const
-  folds at compile time and turns every parked branch into an "unreachable code" warning in the console.
-  How it worked, for when it comes back: ❄ on a segment kept it exactly as generated — `FreezeSegment` copies
-  that frame range's `localQuats` + `rootPositions` out of the current motion into the asset
-  (`Segment.frozenClip`), and every later Generate (a) sends the kept content as a subsampled (~10/s)
-  `fullbody` constraint so the segments around it are generated flowing in and out of it, then (b)
-  **splices the exact frames back** over that range in every returned sample
-  (`KimodoGenerator.ApplyFrozenSegments`, run before `Motion =` so the preview and bake both see it).
-  **It does not make generation faster** — Kimodo's `_multiprompt` feeds each segment into the next
-  (transition constraints built from the previous segment's output), so a segment cannot be skipped
-  without reimplementing that loop server-side; the diffusion still runs over the whole sequence. A frozen
-  segment's duration is **locked** to the frames it kept, and the snap adds half a frame
-  (`seconds = (len + 0.5) / fps`) because both the block math and the server TRUNCATE `seconds × fps` —
-  `61/30 = 2.0333` would round-trip back to 60 frames. Junctions are a hard cut (no crossfade); if a pop
-  shows up, slerp-blend ~3 frames each side.
-- **Compile-verified from the CLI** (see the `unity-cli-compile-check` memory); not yet exercised in the
-  Editor by the user. The repo's `Server/` copy needs re-syncing before the next push.
+  just want to hide it") and later **brought back and rebuilt — see §7h**, which is the current design.
+  The switch is still there: **`KimodoTimeline.FreezeEnabled` (`static readonly bool`, now true)** hides
+  the whole feature when false, and `Segment.HasFrozenContent` then returns false so a segment left
+  `frozen` in an existing asset is generated normally and can still be retimed (no way to get stuck
+  frozen with no UI to release it). `static readonly` rather than `const` on purpose: a const folds at
+  compile time and turns every guarded branch into an "unreachable code" warning in the console.
+  ❄ on a segment keeps it exactly as generated — `FreezeSegment` copies that frame range's `localQuats` +
+  `rootPositions` out of the current motion into the asset (`Segment.frozenClip`).
+  **The first version generated the whole timeline anyway and spliced the kept frames back**, on the
+  assumption that a segment could not be skipped without reimplementing Kimodo's `_multiprompt` loop. It
+  can be: the loop's own handover (a transition constraint built from the previous segment's output) is
+  reproducible through the public constraint API, so frozen segments are now not requested at all, and
+  `BuildFrozenConstraints` / `KimodoGenerator.ApplyFrozenSegments` were deleted with that approach.
+  What still holds: a frozen segment's duration is **locked** to the frames it kept, and the snap adds
+  half a frame (`seconds = (len + 0.5) / fps`) because both the block math and the server TRUNCATE
+  `seconds × fps` — `61/30 = 2.0333` would round-trip back to 60 frames. Junctions are a hard cut in the
+  pose (no crossfade); if a pop shows up, slerp-blend ~3 frames each side.
+- **Compile-verified from the CLI** (see the `unity-cli-compile-check` memory), and since confirmed
+  working in the Editor by the user.
+
+## 7e. Hand/foot constraints, rebuilt like the demo (2026-07-31)
+
+The old target-based `KimodoEndEffectors` (drag a point in the world → two-bone IK the *motion's* pose →
+send it position-only) was replaced, because **a Kimodo end-effector constraint is a POSE, not a point.**
+Read `kimodo/constraints.py::EndEffectorConstraintSet.update_constraints`: from the pose it is given it
+pins the effector chain's joint **positions**, the effector's global **rotation**, and the root's
+`smooth_root_2d` + `root_y_pos` + `global_root_heading`. The demo never sends anything else — its
+`EEJointsKeyframeSet` (kimodo/viz/constraint_ui.py) stores the *whole* `joints_pos [J,3]` + `joints_rot
+[J,3,3]` of the frame being edited plus a list of `joint_names`, and `demo/generation.py` regroups one
+keyframe into **one constraint object per limb, each carrying that same pose**.
+
+What the old version got wrong, and what replaces it:
+- **`FitVerticalY`** — a least-squares fit of `worldY = a·kimodoY + b` per limb, because a hand/foot's
+  height is not a clean affine of the root map. **Deleted.** The handle now sits on the FK of the key's
+  own pose, so world↔Kimodo round-trips through the *root* affine only (the mapping that waypoints
+  proved correct) and there is nothing to guess.
+- **Silent root shifting** — when the target was out of the limb's reach it moved the pelvis toward it,
+  and that shifted pelvis was then pinned as `smooth_root_2d`/`root_y`. **Deleted.** Out of reach draws a
+  yellow dotted line to the target the limb could not make (§7g dropped the wording that went with it,
+  and §7g also removed the pelvis tool from hand/foot keys — the body is moved with a waypoint, or by
+  ticking Free root).
+- **Position-only by default** (`_LeftFootPO` etc. dropping root height + facing) — that existed to stop
+  the *motion's* root fighting a dragged point. Now the pose is authored, so the demo's stock classes are
+  the default and **per key** `freeRoot` opts back into the relaxed variant (server: `_free_root`).
+
+Data model (`Runtime/KimodoEndEffectors.cs`): `Target` = `frame` + `limbs` (a `[Flags] Limb` mask, so one key
+can pin several limbs sharing one pose, exactly as the demo merges them) + `localQuats` + `root` +
+`hasPose` + `show` + `freeRoot`. `BuildConstraints()` emits one per-limb constraint per active limb — per
+limb, **not** generic `end-effector`, because `postprocess.py::_build_constraint_masks_dict` keys its
+exact-snap masks off `constraint.name` (`left-hand` / `right-foot` / …) and a generic `end-effector`
+matches no mask. The legacy `kind`/`world`/`rot` fields are still serialized: `EnsurePose()` migrates an
+old key by seeding the pose from the motion and IK-ing the limb onto its old `world` point, once.
+
+Editor (`Editor/KimodoEndEffectorsEditor.cs`) mirrors the demo's viewer:
+- ghost **skeleton** per shown key — constrained joints/bones **red**, the rest light grey (the demo's
+  `constrained_idx = [root_idx] + ee_joint_indices`, colours `(255,0,0)` / `(220,220,220)`);
+- an **axes gizmo** on each effector's base joint (the demo's `add_batched_axes`) showing the rotation
+  that is being constrained — that rotation *is* part of the constraint, which the old version ignored;
+- a `left-hand + right-foot @ 42` label over the pelvis, and "show only the key at the current frame"
+  (the demo's `show_only_current_constraint`);
+- three tools: **Move limb** (drag the hand/foot → IK on the key's pose, plus a pelvis handle to move the
+  whole pose incl. height), **Aim limb** (rotate the effector), **Rotate joints** (the demo's editing
+  mode: click any joint, rotate it). `keepEffectorOrientation` (default on) re-derives the effector's
+  local rotation after an IK drag so a foot stays flat while the leg bends;
+- optional transparent ghost **mesh**, reusing `KimodoPoseGhosts` (now generalised: `Sync(generator,
+  opacity, IList<PoseView>)`, keyed on an `owner` object, so any editor can drive it).
+
+Constrained joints, confirmed against `skeleton.expand_joint_names()` on **somaskel30** (the model
+skeleton — poses are authored on somaskel77 and converted by `from_dict`): hand ⇒ positions
+`LeftHand` + `LeftHandMiddleEnd`, rotation `LeftHand`; foot ⇒ positions `LeftFoot` + `LeftToeBase`,
+rotation `LeftFoot`. Matches the docs ("wrist position and rotation along with the hand end position").
+
+Verified: package compiles from the CLI (both assemblies), and the server routing was exercised in
+Python — default key ⇒ `LeftHandConstraintSet` pinning `{positions, rots, smooth_root_2d, root_y_pos,
+global_root_heading}`; `freeRoot` ⇒ `_RightFootPO` pinning `{positions, rots, smooth_root_2d}`;
+`crop_move` survives both. **Server changed ⇒ restart the bridge** (repo `Server/` copy re-synced).
+
+## 7f. Constraint editing UX + the gizmo bugs (2026-07-31, same day, after user testing)
+
+User report after trying §7e: one hand worked; adding a second one made the motion glitchy and
+"doesn't fit the skeleton"; **rotating worked for a couple of drags and then stopped entirely**;
+moving was "a little glitchy, sometimes it doesn't move". Three distinct causes, all fixed:
+
+1. **The selection and the active tool lived on the `UnityEditor.Editor` instance.** Unity throws the
+   editor away and rebuilds it whenever the Inspector rebuilds — which `EditorUtility.SetDirty` /
+   `Undo.RecordObject` during a drag can trigger. That reset `_selKey` to −1 (every handle vanishes)
+   and `_tool` to its default (a rotation gizmo silently became a move gizmo). Exactly "it rotates a
+   couple of times and then it doesn't rotate at all". **Fix: `Editor/KimodoEditState.cs`** — static,
+   EditorPrefs-backed tool + `(Component owner, int index)` selection + `SelectedJoint`. **RULE: never
+   keep constraint selection or tool state in an editor instance field.**
+2. **Handles were re-anchored to their own output.** `Handles.PositionHandle(posFromFK…)` was fed the
+   FK position of the effector *after* the IK had clamped it to the limb's reach, so the next event's
+   drag delta was measured from a point that had moved by less than the drag — a feedback loop that
+   jitters and stalls. **Fix:** while `_dragging`, the handle is anchored to the drag value
+   (`_dragPos`/`_dragRot`), released on `MouseUp`; the pose follows the target, not the other way
+   round. Out of reach now draws a dotted line to the target + a label instead.
+3. **Two keys on one frame.** Adding the second hand as its own key gave two end-effector constraints
+   at the same frame, each pinning `smooth_root_2d`/`root_y`/heading from *its own* pose —
+   contradictory conditioning, which is the glitchy result. **Fix:** `AddOrMergeKey(frame, limb)` —
+   one key per frame, extra limbs join the key already there (the demo merges the same way, unioning
+   `joint_names`). Handle sets are also built from the fixed `AllLimbs` order, and decoration is drawn
+   in a separate Repaint-only pass after the handles, so control IDs never shift mid-drag.
+
+Also in this round:
+- **Renamed to match the demo's vocabulary:** `KimodoEffectors` → **`KimodoEndEffectors`** (the demo's
+  track is "End-Effectors"), files + editor renamed with their `.meta` GUIDs preserved so existing
+  scene references survive; timeline track label and inspector headings follow ("Full-Body" for pose
+  keys). Legacy `Kind`/`world`/`rot` fields still deserialize and migrate.
+- **`Editor/KimodoConstraintOverlay.cs`** — a Scene-view **Overlay** ("Kimodo Constraints", dockable
+  from the overlay menu / `` ` ``) holding the tools, so they are one click away like Unity's own tool
+  overlays instead of buried in each inspector: Limb / Aim / Joints / Pose for end-effector keys,
+  Joints / Pose / On-Off for pose keys, plus ◀ ▶ to walk keys **in frame order** (moving the playhead
+  with them) and `＋` to add one at the playhead. `KimodoEditState.ToolFor(bool)` maps a tool that
+  doesn't apply to the other component onto a sensible one, so a shared button can never leave an
+  editor with no gizmo.
+- **Selecting a key got much cheaper**: `FollowPlayhead` (default on) makes the key at the playhead the
+  editable one; clicking a key in the **Timeline window** selects it for Scene editing (`Select` →
+  `KimodoEditState.SelectExplicit`, which turns follow off since it is an explicit pick); clicking any
+  other key's **pelvis dot in the Scene** switches to it.
+- Ghost-mesh transparency defaults to **0.2** on both components (existing scene components keep the
+  value they were serialized with — set it by hand or reset the component).
+
+## 7g. Per-kind tools + focused display (2026-07-31, round 3 after user feedback)
+
+- **Tools are now per constraint KIND, stored per kind** (`KimodoEditState.ToolsFor/Tool/SetTool`,
+  EditorPrefs key per kind). A waypoint offers **Move / Face**, a hand/foot key **Limb / Aim**, a
+  full-body key **Joints / Pose / On-Off**. Joints and Pose were removed from the end-effector toolset
+  on the user's call ("unrelevant"): a hand/foot key's pelvis is now moved by giving it a waypoint or
+  by ticking Free root, and the out-of-reach label says so. Because the tool is stored per kind,
+  selecting a key of another kind (or creating one) switches the toolset with it — the previous
+  version kept one global tool, which is why a newly created key showed the wrong tools.
+- **`KimodoEditState.ResolveFollow(generator)` is the single place that resolves "the key under the
+  playhead"**, called by the overlay and by every editor. Before, each editor decided on its own, so
+  the overlay could not tell which KIND was being edited. Ties go to the component already selected,
+  so working on hand/foot keys never jumps to a pose key that shares the frame.
+- The overlay's **"＋ add a key"** button was removed (the user did not want it); keys are still added
+  from the inspectors and the Timeline's track headers.
+
+Corrected in round 4, same day, after more testing — get these right if this area is touched again:
+- **NO TEXT IN THE SCENE VIEW.** Every `Handles.Label` is gone from the constraint editors (key
+  labels, out-of-reach wording). A grep for `Handles.Label` under `Editor/` must stay empty; wording
+  belongs in the overlay and the inspectors. Out of reach is a yellow dotted line, nothing more.
+- **Waypoints have no tools.** Their combined gizmo (ground dot moves, arrow tip aims) is live on
+  every waypoint at once — that is the part the user was happy with, and splitting it into Move/Face
+  modes made it worse. `ToolsFor(Waypoint)` returns empty and the overlay shows a one-line hint
+  instead of a tool row.
+- **All ghosts are shown**, always; a key is hidden with its own per-key `show` toggle. The
+  `showOnlySelected` fields are gone from both components.
+- **The skeleton is always drawn in full** for end-effector keys. What narrows to the pinned limbs is
+  the **ghost MESH**: `KimodoEndEffectors.GhostChain(limb)` (hand ⇒ Shoulder→Arm→ForeArm→Hand+ends,
+  foot ⇒ Hips→Leg→Shin→Foot→toes) feeds `GhostMask(target, skeleton)` into `PoseView.jointActive`,
+  reusing the pose keys' skin-weighted fade — so a hand key shows an arm, not a whole extra body.
+- **The Timeline's ＋ buttons must publish the selection.** They set `_selKind`/`_selIndex` directly
+  and never reached `KimodoEditState`, so the overlay kept the previous key's tools after adding a
+  key — the "tools don't change for a new key" report. They now go through `SelectNow(kind, index,
+  owner)`. Any new "create a key" path must call `KimodoEditState.Select`.
+
+## 7h. Frozen segments, rebuilt as PARTIAL GENERATION (2026-07-31; server change ⇒ RESTART BRIDGE)
+
+`KimodoTimeline.FreezeEnabled` is **true** again. The parked version generated the whole timeline and
+spliced the kept frames back, which the user rejected ("it should just send the second segment, and I
+should see just one run on the bridge"). It now really skips frozen content:
+
+- `KimodoTimeline.BuildPlan(fps)` splits the timeline into alternating **blocks** — consecutive frozen
+  segments merge into one kept block, consecutive live ones into one request. Freeze the first of two
+  segments ⇒ exactly ONE `/generate`, for the second.
+- `Runtime/KimodoFrozenGenerate.cs` walks the blocks, chaining one request per live run, and
+  assembles the final clip (frozen frames verbatim + the generated runs).
+- **Continuity is the whole problem**, and it is solved the way Kimodo solves it for its own
+  multi-prompt sequences (`kimodo_model.py::_multiprompt`, the `not is_first_motion` branch), through
+  the public constraint API: the frozen block's last **K = 5** frames go in as a `fullbody` constraint
+  **plus** a generic `end-effector` one (Kimodo pairs those two — the second is what carries hand/feet
+  rotations) over the request's first K frames; everything is translated so the handover frame sits at
+  XZ (0,0) and the output is translated back; `first_heading_angle` is the heading of that frame; the
+  K lead frames are then **dropped** (the frozen segment owns them). A frozen block that FOLLOWS a run
+  gets the mirror treatment — K extra frames appended, constrained to its first K frames, dropped.
+  **These boundary constraints ARE the "hidden keys" the user asked for**; they are derived at request
+  time from the frozen clip, so `Unfreeze()` (which clears `frozenClip`) removes them with no cleanup.
+- Durations are built from FRAME COUNTS as `(frames + 0.5) / fps` — both sides truncate `seconds × fps`,
+  so `n/fps` can land a hair under `n`. The assembled length therefore equals `timeline.TotalFrames`.
+- User constraints are remapped per run by `KimodoFrozenGenerate.Remap` (frame shift + the same XZ
+  origin shift, dropping keys outside the run). Keys inside a frozen range are simply not sent.
+- `num_samples` is forced to **1** while anything is frozen (the frozen part is shared, so samples
+  could not diverge anyway), and foot contacts are reported as absent on this path — frozen blocks
+  carry none, so an accumulated array would not line up with the frames.
+- Server: `GenerateRequest` gained `has_first_heading` + `first_heading_angle` (a bool is needed
+  because JsonUtility cannot send a null float), passed straight to `model(...)`. The Unity side
+  computes the angle with Kimodo's own convention — `atan2(dz, -dx)` over (RightLeg − LeftLeg), see
+  `motion_rep/feature_utils.py::compute_heading_angle`; verified numerically against it.
+**The two junctions are NOT symmetric — fixed after the user tested [1 frozen | 2 live | 3 frozen]:**
+the START works because its constrained frames come BEFORE the kept ones (the run enters the kept range
+already snapped onto the frozen pose), while the END's constrained frames come AFTER them, leaving the
+last kept frame the only unconstrained frame at a junction. That is what read as "it does not fit the
+third segment". Two fixes, which compose:
+1. The tail boundary is extended one frame backwards onto the last frame we actually keep — the frozen
+   block's opening pose with its root stepped back by one frame of that block's own entry velocity
+   (33 ms earlier, so the pose is a fair approximation), so post-processing snaps it.
+2. A **two-point motion warp** in `Accumulator.Append`: whatever residual is left at each junction is
+   measured against where the run *ought* to start and end (one step outside each frozen block,
+   extrapolated from that block's own velocity) and lerped across the whole run, ground position only.
+   Junctions then line up exactly with no single-frame step. A correction over 25 cm logs a warning,
+   because meeting the frozen block by moving that far can show as sliding.
+
+- Verified in Python: the boundary pair builds into `FullBodyConstraintSet` + `EndEffectorConstraintSet`,
+  pins {LeftHand, LeftHandMiddleEnd, LeftFoot, LeftToeBase, …}, survives `crop_move`, lands the handover
+  frame exactly on the origin, and is picked up by `postprocess.extract_input_motion_from_constraints`
+  (so the snap applies at the boundary). **Not yet Editor-tested end to end by the user.**
+
+## 7i. The generated motion survives compiles (2026-07-31)
+
+User: "each time Unity compiles, it clears the animation and I can't bake — everything starts from
+scratch." `KimodoGenerator.Motion` is `[NonSerialized]` (it is generated data, off the wire), so every
+domain reload — script compile, entering play mode, restart — threw away a minute of generation.
+
+- `Runtime/KimodoMotionCache.cs` writes it as JSON to **`<project>/Library/KimodoMotionCache/<id>.json`**
+  (already gitignored; Unity's own derived-data folder, safe to delete). One file per generator, keyed
+  by `[SerializeField, HideInInspector] string motionCacheId` — a GUID minted on first use, which also
+  marks the **scene** dirty (`EditorSceneManager.MarkSceneDirty`; `SetDirty` alone does not, and an
+  unsaved scene would lose the id and orphan the cache).
+- `AdoptMotion` writes it; `Editor/KimodoMotionRestore.cs` (`[InitializeOnLoad]` + `delayCall`, same
+  shape as `KimodoBridgeAutoConnect`) restores every generator whose `Motion` is null, and on
+  `sceneOpened`. It skips play mode, which has its own object graph.
+- **`RebindPreview(bool autoFitRootMotion)`**: a restore passes false. The auto-fit is right after a
+  fresh generate, but re-running it on every compile would quietly undo a `rootMotionScale` the user
+  had tuned. The serialized value is used instead.
+- Loading rejects a short/half-written file (frame and joint counts vs. array lengths) so a stale cache
+  can never come back as a broken motion. The generator inspector shows the cache size and a Clear.
+- Serialising the motion into the scene was the alternative and was rejected: hundreds of KB of float
+  arrays in the scene file, re-dirtied on every Generate, for data that is deliberately throwaway.
 
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +
   needs an in-distribution prompt + the body positioned so it's reachable. Recipe: step-up prompt + a **waypoint** to
-  bring the body + raise **Constraint weight** (5–6). IK helps but isn't a hard solve.
-- **Effector rotation gizmo not wired into the IK path** (foot uses its natural orientation). Wiring foot-flat-on-box
-  is a good next task.
+  bring the body + raise **Constraint weight** (5–6). Authoring the whole pose (§7e) plus the postprocess
+  snap gets much closer, but it is still guidance, not a hard solve.
+- **Two-bone IK only** for a dragged limb (upper + mid joints). The shoulder/clavicle and spine do not
+  participate, so a big reach looks stiff until you also rotate them in "Rotate joints" mode.
 - **Pose ghost** is the Kimodo skeleton (SOMA proportions) — shows the *pose* faithfully but won't pixel-overlay the
   Mixamo mesh. Fine per the user; could scale/retarget the ghost if desired.
 - **Foot sliding** (treadmill) — no foot-lock yet; `footContacts` are in the payload → pin planted feet in
   retarget/bake. Not started.
-- **Timeline — BUILT (2026-07-29, see §7c), not yet Editor-tested.** Remaining ideas: per-segment
-  constraint filtering/colour-coding of keys by segment; box-select + multi-key drag; a transition-frames
-  control (`num_transition_frames` is still the server default 5); showing generation progress on the
-  track; and per-segment sampling overrides (steps/seed) if that ever proves useful.
+- **Timeline** (§7c) is in use. Remaining ideas: per-segment constraint filtering/colour-coding of keys
+  by segment; box-select + multi-key drag; a transition-frames control (`num_transition_frames` is still
+  the server default 5, which is also `KimodoFrozenGenerate.LeadFrames`); showing generation progress on
+  the track; per-segment sampling overrides (steps/seed).
+- **Frozen segments** (§7h): a run that has to travel far to meet a frozen block warps to reach it and
+  can slide (there is a >25 cm warning). `num_samples` is forced to 1 while anything is frozen, and foot
+  contacts are not reported on that path. Un-frozen-to-frozen junctions are a hard cut in the pose — the
+  boundary constraints get it close, but no crossfade is applied.
+- **Motion cache** (§7i) has no size limit and is never swept: one file per generator in
+  `Library/KimodoMotionCache/`, replaced on each Generate, orphaned if a character is deleted. Deleting
+  the folder is always safe.
 - **Per-joint constraint intensity (graded weight) is still NOT supported by the model.** `create_conditions` writes
   constrained joints into a **boolean** `motion_mask`; the only strength dial is the global `cfg_weight[1]`
   (`constraintWeight`). Binary joint *selection* now exists (pose-key activation → `_PartialFullBody`, see §7), which

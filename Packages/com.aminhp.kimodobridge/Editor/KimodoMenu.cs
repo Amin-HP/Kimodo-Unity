@@ -52,8 +52,8 @@ namespace AminHP.KimodoBridge.Editor
             gen.bridge = bridge;
             gen.target = animator;
 
-            if (target.GetComponent<KimodoEffectors>() == null)
-                Undo.AddComponent<KimodoEffectors>(target);
+            if (target.GetComponent<KimodoEndEffectors>() == null)
+                Undo.AddComponent<KimodoEndEffectors>(target);
 
             Undo.CollapseUndoOperations(group);
             Selection.activeGameObject = target;

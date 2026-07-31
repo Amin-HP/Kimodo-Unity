@@ -55,7 +55,7 @@ namespace AminHP.KimodoBridge
         public bool showGhostMesh = true;
 
         [Tooltip("Opacity of the ghost mesh (transparency slider).")]
-        [Range(0f, 1f)] public float ghostOpacity = 0.51f;
+        [Range(0f, 1f)] public float ghostOpacity = 0.2f;
 
         [Header("Generate pose from prompt")]
         [Tooltip("Length of the throwaway clip generated to sample a pose from a key's prompt (seconds).")]

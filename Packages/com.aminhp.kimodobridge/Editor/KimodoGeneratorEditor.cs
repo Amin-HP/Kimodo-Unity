@@ -200,6 +200,29 @@ namespace AminHP.KimodoBridge.Editor
                 if (GUILayout.Button("Bake to AnimationClip…", GUILayout.Height(26)))
                     Bake(g);
             }
+
+            DrawMotionCache(g);
+        }
+
+        // The generated motion is kept in Library/ so a script compile, play mode or a restart does not
+        // throw it away — see KimodoMotionCache. Nothing here is required; it is shown so the cache is
+        // not invisible magic, and so it can be cleared.
+        private static void DrawMotionCache(KimodoGenerator g)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                string state = g.HasCachedMotion
+                    ? $"Kept after compiles · {g.CachedMotionBytes / 1024f:0} KB in Library/"
+                    : "Not kept yet — Generate once.";
+                EditorGUILayout.LabelField(new GUIContent(state,
+                    "The generated motion is cached outside the scene, so compiling scripts, entering play " +
+                    "mode or restarting Unity does not lose it. Save the scene at least once so the cache " +
+                    "can be found again after a restart."), EditorStyles.miniLabel);
+
+                using (new EditorGUI.DisabledScope(!g.HasCachedMotion))
+                    if (GUILayout.Button(new GUIContent("Clear", "Forget the cached motion."), GUILayout.Width(52)))
+                        g.ClearCachedMotion();
+            }
         }
 
         private void Bake(KimodoGenerator g)

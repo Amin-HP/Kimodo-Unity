@@ -6,7 +6,7 @@
 //
 //   Prompt      — the KimodoTimeline asset's segments (drag an edge to retime, click to edit the text)
 //   Waypoints   — KimodoWaypoints.waypoints        (root path / root2d)
-//   Effectors   — KimodoEffectors.targets          (hand/foot targets)
+//   Effectors   — KimodoEndEffectors.targets          (hand/foot targets)
 //   Poses       — KimodoPoseConstraints.keys       (whole-rig pose keys)
 //
 // The prompt segments live in the assigned .asset (the "file"); the constraint keys stay on the
@@ -82,7 +82,29 @@ namespace AminHP.KimodoBridge.Editor
 
         private void Defer(Action a) { if (a != null) _deferred.Add(a); Repaint(); }
 
-        private void Select(Sel kind, int index) => Defer(() => { _selKind = kind; _selIndex = index; });
+        /// <summary>Select without deferring — for code already running outside a Layout pass (the ＋
+        /// buttons). Publishing to KimodoEditState is what makes the Scene overlay show the new key's
+        /// tools; setting only the window's own fields left the previous key's tools up.</summary>
+        private void SelectNow(Sel kind, int index, Component owner)
+        {
+            _selKind = kind; _selIndex = index;
+            if (owner != null && index >= 0) KimodoEditState.Select(owner, index);
+        }
+
+        private void Select(Sel kind, int index) => Defer(() =>
+        {
+            _selKind = kind; _selIndex = index;
+            // Clicking a key here also makes it the one you edit in the Scene view, so you never have
+            // to find it again in the inspector. An explicit pick overrides "follow the playhead".
+            Component owner = kind switch
+            {
+                Sel.Effector => Eff,
+                Sel.Pose => Pc,
+                Sel.Waypoint => Wp,
+                _ => null,
+            };
+            if (owner != null && index >= 0) KimodoEditState.SelectExplicit(owner, index);
+        });
 
         /// <summary>Drop a selection whose target is gone (a key deleted from the inspector, the last one
         /// removed, the character swapped). Runs ONLY at the start of a layout pass: a pane that cleared
@@ -127,6 +149,7 @@ namespace AminHP.KimodoBridge.Editor
             // only repaint when it advances.
             KimodoPlayback.Advanced += Repaint;
             Undo.undoRedoPerformed += Repaint;
+            KimodoEditState.Changed += OnEditStateChanged;
             if (_gen == null) AdoptSelection();
         }
 
@@ -134,6 +157,28 @@ namespace AminHP.KimodoBridge.Editor
         {
             KimodoPlayback.Advanced -= Repaint;
             Undo.undoRedoPerformed -= Repaint;
+            KimodoEditState.Changed -= OnEditStateChanged;
+        }
+
+        /// <summary>Selecting a key elsewhere (the Scene overlay's ◀ ▶, a gizmo click) must show up
+        /// here too — highlighted on its track, and with the playhead where that code put it. Without
+        /// the repaint the window keeps drawing the old playhead position even though PreviewTime
+        /// already moved, which reads as "the arrows don't move the playhead".</summary>
+        private void OnEditStateChanged()
+        {
+            // Structural changes only at the start of a Layout pass (see §7c) — hence Defer.
+            Defer(SyncSelectionFromEditState);
+            Repaint();
+        }
+
+        private void SyncSelectionFromEditState()
+        {
+            var owner = KimodoEditState.Owner;
+            int index = KimodoEditState.Index;
+            if (owner == null || index < 0) return;
+            if (ReferenceEquals(owner, Wp)) { _selKind = Sel.Waypoint; _selIndex = index; }
+            else if (ReferenceEquals(owner, Eff)) { _selKind = Sel.Effector; _selIndex = index; }
+            else if (ReferenceEquals(owner, Pc)) { _selKind = Sel.Pose; _selIndex = index; }
         }
 
         private void OnSelectionChange()
@@ -172,7 +217,7 @@ namespace AminHP.KimodoBridge.Editor
         private int PlayFrame => _gen != null ? Mathf.Clamp(Mathf.RoundToInt(_gen.PreviewTime * Fps), 0, TotalFrames - 1) : 0;
         private KimodoTimeline Tl => _gen != null ? _gen.timeline : null;
         private KimodoWaypoints Wp => _gen != null ? _gen.GetComponent<KimodoWaypoints>() : null;
-        private KimodoEffectors Eff => _gen != null ? _gen.GetComponent<KimodoEffectors>() : null;
+        private KimodoEndEffectors Eff => _gen != null ? _gen.GetComponent<KimodoEndEffectors>() : null;
         private KimodoPoseConstraints Pc => _gen != null ? _gen.GetComponent<KimodoPoseConstraints>() : null;
 
         private float FrameToX(float f) => _content.x - _scrollX + f * _pxPerFrame;
@@ -356,7 +401,8 @@ namespace AminHP.KimodoBridge.Editor
         {
             Vector3? at = null;
             if (_selKind == Sel.Waypoint && Wp != null && _selIndex < Wp.waypoints.Count) at = Wp.waypoints[_selIndex].world;
-            else if (_selKind == Sel.Effector && Eff != null && _selIndex < Eff.targets.Count) at = Eff.targets[_selIndex].world;
+            else if (_selKind == Sel.Effector && Eff != null && _selIndex < Eff.targets.Count &&
+                     Eff.TryGetKeyWorld(Eff.targets[_selIndex], out var ew)) at = ew;
             if (at != null && SceneView.lastActiveSceneView != null) SceneView.lastActiveSceneView.LookAt(at.Value);
         }
 
@@ -593,7 +639,7 @@ namespace AminHP.KimodoBridge.Editor
                         if (GUI.Button(plus, new GUIContent("＋", "Add a waypoint at the playhead."))) Defer(AddWaypoint);
                         break;
                     case 2:
-                        GUI.Label(label, "Effectors", EditorStyles.boldLabel);
+                        GUI.Label(label, "End-Effectors", EditorStyles.boldLabel);
                         GUI.Label(sub, Eff != null ? $"{Eff.targets.Count} key(s)" : "add component", EditorStyles.miniLabel);
                         if (GUI.Button(plus, new GUIContent("＋", "Add a hand/foot target at the playhead."))) Defer(AddEffector);
                         break;
@@ -712,13 +758,13 @@ namespace AminHP.KimodoBridge.Editor
         private void DrawEffectorTrack(Rect track)
         {
             var e = Eff;
-            if (e == null) { DrawMissingComponent(track, "KimodoEffectors"); return; }
+            if (e == null) { DrawMissingComponent(track, "KimodoEndEffectors"); return; }
             for (int i = 0; i < e.targets.Count; i++)
             {
                 var t = e.targets[i];
                 int idx = i;
-                DrawKey(track, t.frame, EffectorColor(t.kind), _selKind == Sel.Effector && _selIndex == i,
-                        KindShort(t.kind));
+                DrawKey(track, t.frame, EffectorColor(KimodoEndEffectors.PrimaryLimb(t)),
+                        _selKind == Sel.Effector && _selIndex == i, LimbsShort(t));
                 KeyInteraction(track, t.frame, Sel.Effector, idx, e, "Move target",
                     f => e.targets[idx].frame = f,
                     () => { if (idx < e.targets.Count) e.targets.RemoveAt(idx); });
@@ -926,8 +972,10 @@ namespace AminHP.KimodoBridge.Editor
             {
                 var fc = s.frozenClip;
                 EditorGUILayout.HelpBox(fc != null && fc.IsValid
-                    ? $"❄ Frozen — {fc.frameCount} frames kept ({fc.capturedAt}). Generate leaves this " +
-                      "segment exactly as it is and only regenerates the rest."
+                    ? $"❄ Frozen — {fc.frameCount} frames kept ({fc.capturedAt}). Generate does NOT request " +
+                      "this segment at all: it comes back identical every time, and the run after it is told " +
+                      "where and how it ended so it carries on from there. Unfreezing drops both. " +
+                      "While anything is frozen, Generate returns a single sample."
                     : "❄ Frozen, but nothing was captured — unfreeze and freeze again after a Generate.",
                     MessageType.Info);
                 if (GUILayout.Button(new GUIContent("Re-capture from current motion",
@@ -991,24 +1039,53 @@ namespace AminHP.KimodoBridge.Editor
             if (e == null || _selIndex < 0 || _selIndex >= e.targets.Count) { DrawEmptyPane(); return; }
             var t = e.targets[_selIndex];
 
-            EditorGUILayout.LabelField($"Effector {_selIndex + 1}", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("A hand/foot target at this frame.", EditorStyles.miniLabel);
-            DrawKeyTools(t.frame, t.world);
+            EditorGUILayout.LabelField($"Hand/foot key {_selIndex + 1}", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("A pose whose ticked limbs are pinned.", EditorStyles.miniLabel);
+            // The world position is derived from the pose, so only resolve it if ⌖ is actually pressed.
+            DrawKeyToolsLazy(t.frame, () => e.TryGetKeyWorld(t, out var w) ? (Vector3?)w : null);
 
             EditorGUI.BeginChangeCheck();
-            var kind = (KimodoEffectors.Kind)EditorGUILayout.EnumPopup("Limb", t.kind);
             int frame = Mathf.Clamp(EditorGUILayout.IntField("Frame", t.frame), 0, TotalFrames - 1);
-            Vector3 world = EditorGUILayout.Vector3Field("World", t.world);
-            bool cr = EditorGUILayout.ToggleLeft("Constrain rotation (aim it)", t.constrainRotation);
+            bool show = EditorGUILayout.ToggleLeft("Show ghost in the Scene", t.show);
+            bool fr = EditorGUILayout.ToggleLeft(new GUIContent("Free root",
+                "Pin only the limb + ground position, leaving the pose's height and facing free."), t.freeRoot);
             if (EditorGUI.EndChangeCheck())
             {
-                Undo.RecordObject(e, "Edit target");
-                t.kind = kind; t.frame = frame; t.world = world; t.constrainRotation = cr;
+                Undo.RecordObject(e, "Edit hand/foot key");
+                t.frame = frame; t.show = show; t.freeRoot = fr;
                 EditorUtility.SetDirty(e); SceneView.RepaintAll();
             }
 
-            if (GUILayout.Button(new GUIContent("Snap to bone", "Put the target where that limb already is at this frame.")))
-            { Undo.RecordObject(e, "Snap target"); SnapToBone(t); EditorUtility.SetDirty(e); }
+            EditorGUILayout.LabelField("Pinned limbs", EditorStyles.miniLabel);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                var limbs = KimodoEndEffectors.LimbsOf(t);
+                foreach (var l in KimodoEndEffectors.AllLimbs)
+                {
+                    bool on = (limbs & l) != 0;
+                    var prev = GUI.backgroundColor;
+                    if (on) GUI.backgroundColor = EffectorColor(l);
+                    bool now = GUILayout.Toggle(on, KimodoEndEffectors.ShortName(l), "Button");
+                    GUI.backgroundColor = prev;
+                    if (now != on)
+                    {
+                        Undo.RecordObject(e, "Edit pinned limbs");
+                        t.limbs = now ? (limbs | l) : (limbs & ~l);
+                        EditorUtility.SetDirty(e); SceneView.RepaintAll();
+                    }
+                }
+            }
+
+            using (new EditorGUI.DisabledScope(_gen == null || _gen.Motion == null))
+                if (GUILayout.Button(new GUIContent("Align pose to frame",
+                    "Reseed this key from the generated motion's own pose at its frame.")))
+                {
+                    Undo.RecordObject(e, "Align hand/foot key");
+                    e.AlignKeyToMotion(t);
+                    EditorUtility.SetDirty(e); SceneView.RepaintAll();
+                }
+            EditorGUILayout.LabelField("Select the character to edit the pose in the Scene view.",
+                EditorStyles.wordWrappedMiniLabel);
         }
 
         private void DrawPosePane()
@@ -1084,14 +1161,22 @@ namespace AminHP.KimodoBridge.Editor
         }
 
         // Shared tool strip for a key: jump the playhead to it, look at it in the Scene, delete it.
-        private void DrawKeyTools(int frame, Vector3? focus)
+        private void DrawKeyTools(int frame, Vector3? focus) =>
+            DrawKeyToolsLazy(frame, focus != null ? () => focus : (System.Func<Vector3?>)null);
+
+        // The focus point is a callback so a key whose position has to be computed (a pose's world
+        // placement) only pays for it when ⌖ is pressed, not on every repaint.
+        private void DrawKeyToolsLazy(int frame, System.Func<Vector3?> focus)
         {
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (Tool("⇥", "Move the playhead to this key")) GoToFrame(frame);
-                if (Tool("⌖", "Look at it in the Scene view (F)", focus != null) &&
-                    focus != null && SceneView.lastActiveSceneView != null)
-                    SceneView.lastActiveSceneView.LookAt(focus.Value);
+                if (Tool("⌖", "Look at it in the Scene view (F)", focus != null) && focus != null)
+                {
+                    var at = focus();
+                    if (at != null && SceneView.lastActiveSceneView != null)
+                        SceneView.lastActiveSceneView.LookAt(at.Value);
+                }
                 GUILayout.FlexibleSpace();
                 if (Tool("✕", "Delete this key (Delete)")) Defer(DeleteSelection);
             }
@@ -1125,18 +1210,23 @@ namespace AminHP.KimodoBridge.Editor
                 frame = PlayFrame,
                 world = new Vector3(pos.x, w.groundY, pos.z),
             });
-            _selKind = Sel.Waypoint; _selIndex = w.waypoints.Count - 1;
+            SelectNow(Sel.Waypoint, w.waypoints.Count - 1, w);
             EditorUtility.SetDirty(w); SceneView.RepaintAll();
         }
 
         private void AddEffector()
         {
-            var e = Eff ?? Undo.AddComponent<KimodoEffectors>(_gen.gameObject);
-            Undo.RecordObject(e, "Add target");
-            var t = new KimodoEffectors.Target { frame = PlayFrame, kind = KimodoEffectors.Kind.LeftFoot };
+            var e = Eff ?? Undo.AddComponent<KimodoEndEffectors>(_gen.gameObject);
+            Undo.RecordObject(e, "Add hand/foot key");
+            var t = new KimodoEndEffectors.Target
+            {
+                frame = PlayFrame,
+                limbs = KimodoEndEffectors.Limb.LeftFoot,
+                show = true,
+            };
+            if (!e.AlignKeyToMotion(t)) e.SetIdlePose(t);
             e.targets.Add(t);
-            SnapToBone(t);
-            _selKind = Sel.Effector; _selIndex = e.targets.Count - 1;
+            SelectNow(Sel.Effector, e.targets.Count - 1, e);
             EditorUtility.SetDirty(e); SceneView.RepaintAll();
         }
 
@@ -1147,22 +1237,8 @@ namespace AminHP.KimodoBridge.Editor
             var k = new KimodoPoseConstraints.Key { frame = PlayFrame, show = true };
             p.keys.Add(k);
             if (!p.AlignKeyToMotion(k)) p.SetIdlePose(k);
-            _selKind = Sel.Pose; _selIndex = p.keys.Count - 1;
+            SelectNow(Sel.Pose, p.keys.Count - 1, p);
             EditorUtility.SetDirty(p); SceneView.RepaintAll();
-        }
-
-        // Place a target where its limb already is at that frame (previewing there if we can).
-        private void SnapToBone(KimodoEffectors.Target t)
-        {
-            var tgt = _gen.ResolvedTarget;
-            if (tgt == null) return;
-            float saved = _gen.PreviewTime;
-            if (_gen.IsPreviewBound)
-                _gen.Preview.SampleFrame(_gen.clipIndex, Mathf.Clamp(t.frame, 0, Mathf.Max(0, _gen.FrameCount - 1)));
-            var bone = tgt.GetBoneTransform(KimodoEffectors.Bone(t.kind));
-            if (bone != null) { t.world = bone.position; t.rot = bone.rotation; }
-            if (_gen.IsPreviewBound) _gen.SampleTime(saved);
-            SceneView.RepaintAll();
         }
 
         // ---- segment operations -----------------------------------------
@@ -1217,9 +1293,6 @@ namespace AminHP.KimodoBridge.Editor
             EditorUtility.SetDirty(tl);
         }
 
-        // Frozen segments are PARKED (KimodoTimeline.FreezeEnabled == false): the UI below is hidden and
-        // this reads false for every segment, so an asset that was frozen while the feature was live can
-        // still be retimed and is generated normally. Flip the const to bring the whole thing back.
         private static bool Frozen(KimodoTimeline.Segment s) => KimodoTimeline.FreezeEnabled && s != null && s.frozen;
 
         // Freeze = keep this segment's frames exactly as they came out and stop regenerating them.
@@ -1231,7 +1304,9 @@ namespace AminHP.KimodoBridge.Editor
             if (tl == null || i < 0 || i >= tl.SegmentCount) return;
             var s = tl.segments[i];
             Undo.RecordObject(tl, s.frozen ? "Unfreeze segment" : "Freeze segment");
-            if (s.frozen) s.frozen = false;                       // keep the clip so re-freezing is free
+            // Unfreezing drops the kept frames, and with them the boundary constraints they imply — the
+            // "hidden keys" that made the next run start where this segment ended.
+            if (s.frozen) tl.Unfreeze(i);
             else if (!tl.FreezeSegment(i, _gen.Motion, _gen.clipIndex, Fps))
                 Debug.LogWarning("[Kimodo] Nothing to freeze — Generate first so this segment has frames.");
             EditorUtility.SetDirty(tl);
@@ -1290,7 +1365,7 @@ namespace AminHP.KimodoBridge.Editor
                         "This REPLACES the character's waypoints, effector targets and pose keys with the ones " +
                         "saved in the timeline file. Continue?", "Load", "Cancel")) return;
                     var w = Wp ?? Undo.AddComponent<KimodoWaypoints>(_gen.gameObject);
-                    var e = Eff ?? Undo.AddComponent<KimodoEffectors>(_gen.gameObject);
+                    var e = Eff ?? Undo.AddComponent<KimodoEndEffectors>(_gen.gameObject);
                     var p = Pc ?? Undo.AddComponent<KimodoPoseConstraints>(_gen.gameObject);
                     Undo.RecordObject(w, "Load Kimodo take");
                     Undo.RecordObject(e, "Load Kimodo take");
@@ -1368,23 +1443,24 @@ namespace AminHP.KimodoBridge.Editor
         }
 
         // ---- small helpers ----------------------------------------------
-        private static Color EffectorColor(KimodoEffectors.Kind k) => k switch
+        private static Color EffectorColor(KimodoEndEffectors.Limb k) => k switch
         {
-            KimodoEffectors.Kind.LeftHand => new Color(0.35f, 0.7f, 1f),
-            KimodoEffectors.Kind.RightHand => new Color(0.2f, 0.5f, 1f),
-            KimodoEffectors.Kind.LeftFoot => new Color(1f, 0.75f, 0.3f),
-            KimodoEffectors.Kind.RightFoot => new Color(1f, 0.55f, 0.15f),
+            KimodoEndEffectors.Limb.LeftHand => new Color(0.35f, 0.7f, 1f),
+            KimodoEndEffectors.Limb.RightHand => new Color(0.2f, 0.5f, 1f),
+            KimodoEndEffectors.Limb.LeftFoot => new Color(1f, 0.75f, 0.3f),
+            KimodoEndEffectors.Limb.RightFoot => new Color(1f, 0.55f, 0.15f),
             _ => Color.white,
         };
 
-        private static string KindShort(KimodoEffectors.Kind k) => k switch
+        // "LF", or "LF+RH" when one key pins several limbs.
+        private static string LimbsShort(KimodoEndEffectors.Target t)
         {
-            KimodoEffectors.Kind.LeftHand => "LH",
-            KimodoEffectors.Kind.RightHand => "RH",
-            KimodoEffectors.Kind.LeftFoot => "LF",
-            KimodoEffectors.Kind.RightFoot => "RF",
-            _ => "",
-        };
+            var limbs = KimodoEndEffectors.LimbsOf(t);
+            string s = "";
+            foreach (var l in KimodoEndEffectors.AllLimbs)
+                if ((limbs & l) != 0) s += (s.Length > 0 ? "+" : "") + KimodoEndEffectors.ShortName(l);
+            return s;
+        }
 
         private static string Truncate(string s, int n) =>
             string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(0, n - 1) + "…";

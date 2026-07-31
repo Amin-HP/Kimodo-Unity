@@ -4,7 +4,7 @@
 // and previews the result on the character via KimodoPlayer (Mecanim retarget).
 //
 // The editor (KimodoGeneratorEditor) drives play/scrub and baking; this component
-// owns the state so a sibling KimodoEffectors/KimodoWaypoints can read the current motion + frame.
+// owns the state so a sibling KimodoEndEffectors/KimodoWaypoints can read the current motion + frame.
 // Generated data and the preview engine are transient (rebuilt on Generate).
 
 using System;
@@ -52,6 +52,10 @@ namespace AminHP.KimodoBridge
         public KimodoRootBake rootBakeMode = KimodoRootBake.Travel;
         public bool loop = true;
         public int clipIndex = 0;
+
+        // Identifies this character's cached motion on disk (Library/KimodoMotionCache). Serialized so
+        // the same file is found again after a compile or a restart; hidden because it is plumbing.
+        [SerializeField, HideInInspector] private string motionCacheId;
 
         // ---- transient runtime state ----
         [NonSerialized] public KimodoMotion Motion;
@@ -134,21 +138,25 @@ namespace AminHP.KimodoBridge
             if (b == null) { Info = "No KimodoBridge in the scene. Add one (GameObject ▸ Kimodo ▸ Bridge Manager)."; onDone?.Invoke(); return; }
             if (!b.IsOnline) { Info = "Bridge is not connected. Press Connect on the KimodoBridge."; onDone?.Invoke(); return; }
 
-            // Gather constraints from any sibling providers (hand/foot targets + root waypoints).
-            var built = new List<KimodoConstraint>();
-            var eff = GetComponent<KimodoEffectors>();
-            if (eff != null) { var l = eff.BuildConstraints(); if (l != null) built.AddRange(l); }
-            var wp = GetComponent<KimodoWaypoints>();
-            if (wp != null) { var r = wp.BuildRootConstraints(); if (r != null) built.AddRange(r); }
-            var pc = GetComponent<KimodoPoseConstraints>();
-            if (pc != null) { var l = pc.BuildConstraints(); if (l != null) built.AddRange(l); }
+            var built = GatherUserConstraints();
 
-            // Frozen timeline segments: steer the model toward the content we are keeping, so what is
-            // generated around them flows in and out of it (the exact frames are spliced back below).
-            if (UsingTimeline && PoseSkeleton != null)
+            // Frozen segments are not generated at all: only the runs between them are requested, and
+            // the kept frames are spliced in. See KimodoFrozenGenerate.
+            if (UsingTimeline && PoseSkeleton != null && timeline.AnyFrozenContent)
             {
-                var fz = timeline.BuildFrozenConstraints(Fps, AuthoringFrameCount, PoseSkeleton.jointCount);
-                if (fz != null) built.AddRange(fz);
+                Busy = true;
+                Info = "Generating the live segments…";
+                KimodoFrozenGenerate.Run(this, built,
+                    progress => { Info = progress; },
+                    (ok, motion, err) =>
+                    {
+                        if (!this) return;
+                        Busy = false;
+                        if (!ok) { Info = "Generation failed: " + err; onDone?.Invoke(); return; }
+                        AdoptMotion(motion, " (frozen segments kept)");
+                        onDone?.Invoke();
+                    });
+                return;
             }
 
             Busy = true;
@@ -180,46 +188,95 @@ namespace AminHP.KimodoBridge
                     onDone?.Invoke();
                     return;
                 }
-                ApplyFrozenSegments(motion);
-                Motion = motion;
-                clipIndex = 0;
-                PreviewTime = 0f;
-                Info = $"Got {motion.frameCount} frames @ {motion.fps}fps · {motion.jointCount} joints · " +
-                       $"{motion.clips.Count} sample(s) · {motion.generationSeconds}s";
-                RebindPreview();
+                AdoptMotion(motion, null);
                 onDone?.Invoke();
             });
         }
 
-        /// <summary>Put every frozen segment's kept frames back into a freshly generated motion, so a
-        /// frozen segment returns EXACTLY as it was — the constraint only steers the model near it.
-        /// Applied to every sample so all of them share the frozen part.</summary>
-        private void ApplyFrozenSegments(KimodoMotion motion)
+        /// <summary>The constraints the character's own components ask for (hand/foot keys, root
+        /// waypoints, full-body poses), in absolute timeline frames.</summary>
+        public List<KimodoConstraint> GatherUserConstraints()
         {
-            if (motion == null || motion.clips == null || !UsingTimeline) return;
-            float fps = motion.fps > 0f ? motion.fps : 30f;
-            int J = motion.jointCount;
+            var built = new List<KimodoConstraint>();
+            var eff = GetComponent<KimodoEndEffectors>();
+            if (eff != null) { var l = eff.BuildConstraints(); if (l != null) built.AddRange(l); }
+            var wp = GetComponent<KimodoWaypoints>();
+            if (wp != null) { var r = wp.BuildRootConstraints(); if (r != null) built.AddRange(r); }
+            var pc = GetComponent<KimodoPoseConstraints>();
+            if (pc != null) { var l = pc.BuildConstraints(); if (l != null) built.AddRange(l); }
+            return built;
+        }
 
-            for (int i = 0; i < timeline.SegmentCount; i++)
+        private void AdoptMotion(KimodoMotion motion, string note)
+        {
+            Motion = motion;
+            clipIndex = 0;
+            PreviewTime = 0f;
+            Info = $"Got {motion.frameCount} frames @ {motion.fps}fps · {motion.jointCount} joints · " +
+                   $"{motion.clips.Count} sample(s) · {motion.generationSeconds}s" + note;
+            RebindPreview();
+#if UNITY_EDITOR
+            CacheMotion();
+#endif
+        }
+
+#if UNITY_EDITOR
+        /// <summary>Stable id for this character's cached motion, created on first use.</summary>
+        public string MotionCacheId
+        {
+            get
             {
-                var s = timeline.segments[i];
-                if (s == null || !s.HasFrozenContent || s.frozenClip.jointCount != J) continue;
-                int start = timeline.StartFrame(i, fps);
-                int len = Mathf.Min(s.frozenClip.frameCount, motion.frameCount - start);
-                if (start < 0 || len <= 0) continue;
-
-                foreach (var clip in motion.clips)
+                if (string.IsNullOrEmpty(motionCacheId))
                 {
-                    if (clip.localQuats != null && clip.localQuats.Length >= (start + len) * J * 4)
-                        Array.Copy(s.frozenClip.localQuats, 0, clip.localQuats, start * J * 4, len * J * 4);
-                    if (clip.rootPositions != null && clip.rootPositions.Length >= (start + len) * 3)
-                        Array.Copy(s.frozenClip.rootPositions, 0, clip.rootPositions, start * 3, len * 3);
+                    motionCacheId = Guid.NewGuid().ToString("N");
+                    UnityEditor.EditorUtility.SetDirty(this);
+                    // SetDirty alone does not mark a SCENE dirty, and an unsaved scene would lose the id
+                    // (and with it the cache) on the next restart.
+                    if (gameObject.scene.IsValid())
+                        UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(gameObject.scene);
                 }
+                return motionCacheId;
             }
         }
 
+        public bool HasCachedMotion => !string.IsNullOrEmpty(motionCacheId) && KimodoMotionCache.Exists(motionCacheId);
+        public long CachedMotionBytes => string.IsNullOrEmpty(motionCacheId) ? 0L : KimodoMotionCache.SizeOf(motionCacheId);
+
+        /// <summary>Keep the current motion on disk so a compile / restart does not lose it.</summary>
+        public void CacheMotion()
+        {
+            if (Motion != null) KimodoMotionCache.Save(MotionCacheId, Motion);
+        }
+
+        /// <summary>Bring back the motion this character had before the last domain reload. Returns
+        /// false when there is nothing cached (or it no longer loads).</summary>
+        public bool RestoreCachedMotion()
+        {
+            if (Motion != null || string.IsNullOrEmpty(motionCacheId)) return false;
+            var m = KimodoMotionCache.Load(motionCacheId);
+            if (m == null) return false;
+            Motion = m;
+            clipIndex = Mathf.Clamp(clipIndex, 0, Mathf.Max(0, m.clips.Count - 1));
+            PreviewTime = 0f;
+            Info = $"Restored {m.frameCount} frames from the cache (not regenerated).";
+            RebindPreview(false);   // keep the root scale the user settled on
+            return true;
+        }
+
+        /// <summary>Forget the cached motion (the next Generate writes a new one).</summary>
+        public void ClearCachedMotion()
+        {
+            if (!string.IsNullOrEmpty(motionCacheId)) KimodoMotionCache.Delete(motionCacheId);
+        }
+#endif
+
         /// <summary>(Re)build the retarget preview for the current motion + target. Auto-fits root scale.</summary>
-        public bool RebindPreview()
+        public bool RebindPreview() => RebindPreview(true);
+
+        /// <param name="autoFitRootMotion">Re-measure the root travel scale. True on a fresh generate;
+        /// false when restoring a cached motion, where the serialized scale is the one the user settled
+        /// on and re-fitting it would quietly undo their tuning on every script compile.</param>
+        public bool RebindPreview(bool autoFitRootMotion)
         {
             Playing = false;
             Preview?.Dispose();
@@ -238,7 +295,7 @@ namespace AminHP.KimodoBridge
                 Preview = null;
                 return false;
             }
-            rootMotionScale = Preview.AutoCalibrateRootMotion(clipIndex);
+            if (autoFitRootMotion) rootMotionScale = Preview.AutoCalibrateRootMotion(clipIndex);
             Preview.RootMotionScale = rootMotionScale;
             SampleCurrent();
             return true;

@@ -8,7 +8,7 @@
 // asset is the structured form of exactly that: BuildPrompt() / BuildDuration() compose it back for
 // /generate, and StartFrame()/FrameCountOf() give each segment its place on the frame axis.
 //
-// The constraint keys themselves live on the scene components (KimodoWaypoints / KimodoEffectors /
+// The constraint keys themselves live on the scene components (KimodoWaypoints / KimodoEndEffectors /
 // KimodoPoseConstraints) — they hold WORLD positions and draw Scene gizmos, so the scene is their
 // natural home. CaptureTake / ApplyTake copy them in and out of this asset on demand.
 
@@ -23,13 +23,12 @@ namespace AminHP.KimodoBridge
     [CreateAssetMenu(fileName = "Kimodo Timeline", menuName = "Kimodo/Timeline", order = 200)]
     public class KimodoTimeline : ScriptableObject
     {
-        /// <summary>Master switch for frozen segments (parked, not finished — see HANDOFF §7c).
-        /// While false the ❄ UI is hidden and a leftover <c>frozen</c> flag in an asset does nothing,
-        /// so a segment can never get stuck frozen with no way to release it. Everything else the
-        /// feature needs is still here; set this to true to bring it back.</summary>
+        /// <summary>Master switch for frozen segments. Kept as a switch so the feature can be parked
+        /// again without ripping the code out; see HANDOFF §7h for how freezing actually works now
+        /// (frozen segments are NOT generated — only the runs between them are requested).</summary>
         /// <remarks>`static readonly`, not `const`: a const would be folded at compile time, making the
-        /// parked branches "unreachable code" warnings and baking the value into other assemblies.</remarks>
-        public static readonly bool FreezeEnabled = false;
+        /// guarded branches "unreachable code" warnings and baking the value into other assemblies.</remarks>
+        public static readonly bool FreezeEnabled = true;
 
         [Serializable]
         public class Segment
@@ -249,49 +248,95 @@ namespace AminHP.KimodoBridge
             return true;
         }
 
-        /// <summary>One `fullbody` constraint per frozen segment: the kept content, subsampled, so the
-        /// model generates the segments around it flowing in and out of what is being kept. The exact
-        /// frames are put back afterwards (<see cref="KimodoGenerator"/> splices them).</summary>
-        public List<KimodoConstraint> BuildFrozenConstraints(float fps, int totalFrames, int jointCount)
+        /// <summary>Drop a segment's frozen content (it will be generated again from now on).</summary>
+        public void Unfreeze(int index)
         {
-            List<KimodoConstraint> result = null;
+            if (index < 0 || index >= SegmentCount || segments[index] == null) return;
+            segments[index].frozen = false;
+            segments[index].frozenClip = null;
+        }
+
+        public bool AnyFrozenContent
+        {
+            get
+            {
+                for (int i = 0; i < SegmentCount; i++)
+                    if (segments[i] != null && segments[i].HasFrozenContent) return true;
+                return false;
+            }
+        }
+
+        /// <summary>A stretch of the timeline that is either kept as-is or generated in one request.
+        /// Frozen neighbours are what a run has to start from and arrive at.</summary>
+        public struct Block
+        {
+            public bool frozen;
+            public int firstSegment, lastSegment;   // inclusive
+            public int startFrame, frameCount;
+        }
+
+        /// <summary>Split the timeline into alternating frozen / generated blocks. Consecutive frozen
+        /// segments merge into one kept block, and consecutive live segments into one request — so
+        /// freezing the first of two segments means exactly ONE generate call, for the second.</summary>
+        public List<Block> BuildPlan(float fps)
+        {
+            var blocks = new List<Block>();
+            int frame = 0;
             for (int i = 0; i < SegmentCount; i++)
             {
-                var s = segments[i];
-                if (s == null || !s.HasFrozenContent || s.frozenClip.jointCount != jointCount) continue;
-
-                int start = StartFrame(i, fps);
-                int len = Mathf.Min(s.frozenClip.frameCount, totalFrames - start);
-                if (start < 0 || len <= 0) continue;
-
-                // ~10 keys per second is plenty to steer the neighbours; the splice does the rest.
-                int stride = Mathf.Max(1, Mathf.RoundToInt(fps / 10f));
-                var frames = new List<int>();
-                for (int f = 0; f < len; f += stride) frames.Add(f);
-                if (frames[frames.Count - 1] != len - 1) frames.Add(len - 1);   // always pin the exit
-
-                int J = jointCount;
-                var q = new float[frames.Count * J * 4];
-                var r = new float[frames.Count * 3];
-                for (int n = 0; n < frames.Count; n++)
+                int n = FrameCountOf(i, fps);
+                if (n == 0) continue;                       // blank prompt: contributes nothing
+                bool frozen = segments[i].HasFrozenContent;
+                if (blocks.Count > 0)
                 {
-                    Array.Copy(s.frozenClip.localQuats, frames[n] * J * 4, q, n * J * 4, J * 4);
-                    Array.Copy(s.frozenClip.rootPositions, frames[n] * 3, r, n * 3, 3);
+                    var last = blocks[blocks.Count - 1];
+                    if (last.frozen == frozen)
+                    {
+                        last.lastSegment = i;
+                        last.frameCount += n;
+                        blocks[blocks.Count - 1] = last;
+                        frame += n;
+                        continue;
+                    }
                 }
-
-                var idx = new int[frames.Count];
-                for (int n = 0; n < frames.Count; n++) idx[n] = start + frames[n];
-
-                (result ??= new List<KimodoConstraint>()).Add(new KimodoConstraint
+                blocks.Add(new Block
                 {
-                    type = "fullbody",
-                    frameIndices = idx,
-                    localQuats = q,
-                    rootPositions = r,
-                    jointNames = Array.Empty<string>(),
+                    frozen = frozen, firstSegment = i, lastSegment = i,
+                    startFrame = frame, frameCount = n,
                 });
+                frame += n;
             }
-            return result;
+            return blocks;
+        }
+
+        /// <summary>The kept frames of a frozen block, concatenated (Kimodo coords).
+        /// <paramref name="quats"/> is frameCount*J*4 and <paramref name="roots"/> frameCount*3.</summary>
+        public bool TryGetFrozenFrames(Block block, int jointCount, out float[] quats, out float[] roots, out int frameCount)
+        {
+            quats = null; roots = null; frameCount = 0;
+            if (!block.frozen) return false;
+
+            int total = 0;
+            for (int i = block.firstSegment; i <= block.lastSegment; i++)
+            {
+                var s = segments[i];
+                if (s == null || !s.HasFrozenContent || s.frozenClip.jointCount != jointCount) return false;
+                total += s.frozenClip.frameCount;
+            }
+            if (total <= 0) return false;
+
+            quats = new float[total * jointCount * 4];
+            roots = new float[total * 3];
+            int at = 0;
+            for (int i = block.firstSegment; i <= block.lastSegment; i++)
+            {
+                var fc = segments[i].frozenClip;
+                Array.Copy(fc.localQuats, 0, quats, at * jointCount * 4, fc.frameCount * jointCount * 4);
+                Array.Copy(fc.rootPositions, 0, roots, at * 3, fc.frameCount * 3);
+                at += fc.frameCount;
+            }
+            frameCount = total;
+            return true;
         }
 
         // ---------------------------------------------------------------
@@ -311,7 +356,15 @@ namespace AminHP.KimodoBridge
         public class EffectorRec
         {
             public int frame;
-            public KimodoEffectors.Kind kind;
+            public KimodoEndEffectors.Limb limbs;
+            public bool hasPose;
+            public bool show = true;
+            public bool freeRoot;
+            public Vector3 root;
+            public float[] localQuats;
+
+            // legacy (target-based keys), kept so older takes still restore and then migrate
+            public KimodoEndEffectors.Kind kind;
             public Vector3 world;
             public Quaternion rot = Quaternion.identity;
             public bool constrainRotation;
@@ -362,13 +415,15 @@ namespace AminHP.KimodoBridge
                         constrainFacing = w.constrainFacing, headingDeg = w.headingDeg,
                     });
 
-            var eff = g.GetComponent<KimodoEffectors>();
+            var eff = g.GetComponent<KimodoEndEffectors>();
             if (eff != null)
                 foreach (var t in eff.targets)
                     take.effectors.Add(new EffectorRec
                     {
-                        frame = t.frame, kind = t.kind, world = t.world,
-                        rot = t.rot, constrainRotation = t.constrainRotation,
+                        frame = t.frame, limbs = KimodoEndEffectors.LimbsOf(t),
+                        hasPose = t.hasPose, show = t.show, freeRoot = t.freeRoot, root = t.root,
+                        localQuats = t.localQuats != null ? (float[])t.localQuats.Clone() : null,
+                        kind = t.kind, world = t.world, rot = t.rot, constrainRotation = t.constrainRotation,
                     });
 
             var pc = g.GetComponent<KimodoPoseConstraints>();
@@ -401,15 +456,17 @@ namespace AminHP.KimodoBridge
                     });
             }
 
-            var eff = g.GetComponent<KimodoEffectors>();
+            var eff = g.GetComponent<KimodoEndEffectors>();
             if (eff != null)
             {
                 eff.targets.Clear();
                 foreach (var r in take.effectors)
-                    eff.targets.Add(new KimodoEffectors.Target
+                    eff.targets.Add(new KimodoEndEffectors.Target
                     {
-                        frame = r.frame, kind = r.kind, world = r.world,
-                        rot = r.rot, constrainRotation = r.constrainRotation,
+                        frame = r.frame, limbs = r.limbs,
+                        hasPose = r.hasPose, show = r.show, freeRoot = r.freeRoot, root = r.root,
+                        localQuats = r.localQuats != null ? (float[])r.localQuats.Clone() : null,
+                        kind = r.kind, world = r.world, rot = r.rot, constrainRotation = r.constrainRotation,
                     });
             }
 

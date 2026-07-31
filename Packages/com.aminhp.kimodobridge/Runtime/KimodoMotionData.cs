@@ -69,8 +69,14 @@ namespace AminHP.KimodoBridge
         public float[] rootHeading2d;   // optional, root2d only: N*2 [cos,sin] of the Kimodo heading
                                         // angle to face at each frame (null = don't constrain facing).
 
-        // Direct effector target (KimodoEffectors): explicit world->Kimodo target for a hand/foot,
-        // instead of a captured pose. Present => the server builds a single-joint target constraint.
+        // Hand/foot keyframes only (KimodoEndEffectors). false (the demo's behaviour) pins the pose's
+        // root ground position, height and facing along with the limb, so the result matches the
+        // ghost you authored. true drops height + facing, letting the body rise/turn to reach.
+        public bool freeRoot;
+
+        // Direct effector target (legacy KimodoEndEffectors path, no longer sent): explicit world->Kimodo
+        // target for a hand/foot instead of a captured pose. If present the server builds a
+        // single-joint target constraint, which gets no post-processing snap — hence the pose path.
         public float[] effectorPos;     // N*3, Kimodo global position of the effector
         public float[] effectorRot;     // N*4 wxyz, Kimodo global rotation (only if constrainRot)
         public float[] effectorRootXZ;  // N*2, Kimodo smooth-root (x,z) at each frame (required)
@@ -91,6 +97,12 @@ namespace AminHP.KimodoBridge
                                            // cfg_weight[1] for that segment (null/empty = same weight throughout)
         public int seed = -1;              // -1 => omit (see KimodoClient serialization)
         public bool postprocess = true;
+        // Initial body heading (radians, Kimodo convention: 0 = facing +Z). Set both when a request
+        // continues motion the client already has — the frames after a frozen timeline segment — so the
+        // model starts facing the way that motion ended. The bool is needed because JsonUtility cannot
+        // send a null float.
+        public bool has_first_heading;
+        public float first_heading_angle;
         public bool include_positions = false;
         public List<KimodoConstraint> constraints;   // null/empty => unconstrained
     }

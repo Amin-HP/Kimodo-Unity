@@ -95,6 +95,19 @@ class GenerateRequest(BaseModel):
         ),
     )
     postprocess: bool = Field(default=True, description="Foot-skate cleanup (ignored for G1).")
+    has_first_heading: bool = Field(
+        default=False,
+        description="Whether first_heading_angle below is meaningful (JSON clients cannot send null floats).",
+    )
+    first_heading_angle: float = Field(
+        default=0.0,
+        description=(
+            "Initial body heading in radians, Kimodo convention (0 = facing +Z). Used only when "
+            "has_first_heading is true. Set it when a request continues from motion the client already "
+            "has — e.g. the frames after a frozen timeline segment — so the model starts out facing the "
+            "way that motion ended instead of the default 0."
+        ),
+    )
     include_positions: bool = Field(
         default=False,
         description="Also return posed_joints world positions per frame (larger payload, useful for debugging).",
@@ -294,6 +307,13 @@ def _build_constraint_dicts(
         if joint_names:
             d["joint_names"] = list(joint_names)
 
+        # Hand/foot keys: by default they behave exactly like the demo's end-effector keyframes —
+        # the pose's root ground position, height and facing are pinned along with the limb, so the
+        # generated motion matches the pose that was authored. "freeRoot" opts into the relaxed
+        # variant below (limb + ground position only), for when the body should adapt to reach.
+        if ctype in _EFFECTOR_JOINT and c.get("freeRoot"):
+            d["_free_root"] = True
+
         # fullbody only: an active-joint subset -> constrain ONLY these joints' positions (partial
         # pose, e.g. upper body). Resolved to indices at load time (robust to SOMA 30/77).
         active = c.get("activeJoints")
@@ -345,14 +365,16 @@ def _apply_target_offsets(constraint_lst: list, con_dicts: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Position-only end-effector constraints.
+# Position-only end-effector constraints ("free root", opt-in per key).
 #
 # Kimodo's stock end-effector constraint ALSO pins the root ground position
 # (smooth_root_2d), root height (root_y_pos) and facing (global_root_heading) from
-# the captured pose. That fights the user when they drag a foot/hand somewhere new
-# (e.g. onto an obstacle): the body root stays where the original motion put it, so
-# the target can't be reached. These subclasses constrain ONLY the effector joint
-# position(s) + orientation, leaving the root free to move to satisfy the pin.
+# the pose the keyframe carries. That is the right default — it is what the demo
+# does, and with a pose authored in the editor those root values are exactly what
+# the user posed. But when a limb has to reach somewhere the body must adapt to
+# (stepping onto a box while the hips stay where the motion put them), the pinned
+# height/facing fight the pin. These subclasses then constrain ONLY the effector
+# joint position(s) + orientation, leaving height and facing free.
 # ---------------------------------------------------------------------------
 def _ee_position_only_update(self, data_dict, index_dict):
     crop = torch.arange(len(self.frame_indices), device=self.frame_indices.device)
@@ -517,9 +539,10 @@ class _PartialFullBody:
 
 
 def _load_constraints(con_dicts: list[dict], skeleton) -> list:
-    """Build constraint objects. Direct effector targets use _SingleJointTarget; captured-pose
-    effector pins use the position-only subclasses; a fullbody with an active-joint subset uses
-    _PartialFullBody; root2d/fullbody use their default classes.
+    """Build constraint objects. Direct effector targets use _SingleJointTarget; a fullbody with an
+    active-joint subset uses _PartialFullBody; a hand/foot key marked "_free_root" uses the
+    position-only subclass; everything else uses Kimodo's own class for that type, which is what the
+    demo does.
     """
     lst = []
     dev = skeleton.device if hasattr(skeleton, "device") else "cpu"
@@ -541,9 +564,11 @@ def _load_constraints(con_dicts: list[dict], skeleton) -> list:
                 continue
             base = FullBodyConstraintSet.from_dict(skeleton, d)
             lst.append(_PartialFullBody.from_full(base, torch.tensor(idx, dtype=torch.long)))
-        else:
+        elif d.get("_free_root"):
             cls = _POSITION_ONLY_CLASSES.get(d["type"], TYPE_TO_CLASS[d["type"]])
             lst.append(cls.from_dict(skeleton, d))
+        else:
+            lst.append(TYPE_TO_CLASS[d["type"]].from_dict(skeleton, d))
     return lst
 
 
@@ -743,6 +768,9 @@ def generate(req: GenerateRequest) -> dict:
                         cfg_weight=cfg_weight,
                         post_processing=use_postprocess,
                         return_numpy=True,
+                        first_heading_angle=(
+                            float(req.first_heading_angle) if req.has_first_heading else None
+                        ),
                     )
         except Exception as exc:  # noqa: BLE001 - surface the real error to the client + logs
             traceback.print_exc()
