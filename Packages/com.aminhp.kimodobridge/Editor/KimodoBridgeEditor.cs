@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Inspector for the KimodoBridge manager: server URL, Connect, model dropdown +
-// preload, and live connection/model status.
+// preload, live connection/model status, and starting/stopping the server itself
+// (see KimodoServerLauncher).
 
 using System;
 using UnityEditor;
@@ -41,6 +42,9 @@ namespace AminHP.KimodoBridge.Editor
             EditorGUILayout.LabelField(b.StatusMessage, EditorStyles.wordWrappedMiniLabel);
 
             EditorGUILayout.Space();
+            DrawServerProcess(b);
+
+            EditorGUILayout.Space();
             EditorGUILayout.LabelField("Model", EditorStyles.boldLabel);
             DrawModelPicker(b);
 
@@ -53,6 +57,88 @@ namespace AminHP.KimodoBridge.Editor
             DrawStatusDot(ModelColor(b.ModelState),
                 (b.ModelState == KimodoBridge.ModelLoadState.Loading ? "◌ " : "● ") + b.ModelStatus);
         }
+
+        // Run the Python server from here instead of keeping a PowerShell window open. The path is an
+        // EditorPref, not a scene value: it points at this machine's Kimodo checkout, which is not
+        // something to commit into a scene.
+        private void DrawServerProcess(KimodoBridge b)
+        {
+            _serverFoldout = EditorGUILayout.Foldout(_serverFoldout, "Server process", true);
+            if (!_serverFoldout) return;
+
+            using (new EditorGUI.IndentLevelScope())
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUI.BeginChangeCheck();
+                    string path = EditorGUILayout.TextField(new GUIContent("run_bridge.ps1",
+                        "The launcher script in your Kimodo checkout. Remembered per machine."),
+                        KimodoServerLauncher.ScriptPath);
+                    if (EditorGUI.EndChangeCheck()) KimodoServerLauncher.ScriptPath = path;
+
+                    if (GUILayout.Button("…", GUILayout.Width(26)))
+                    {
+                        string picked = EditorUtility.OpenFilePanel("Select run_bridge.ps1", "", "ps1");
+                        if (!string.IsNullOrEmpty(picked)) KimodoServerLauncher.ScriptPath = picked;
+                    }
+                }
+
+                bool running = KimodoServerLauncher.IsRunning;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    using (new EditorGUI.DisabledScope(running || KimodoServerLauncher.Starting))
+                        if (GUILayout.Button(KimodoServerLauncher.Starting ? "Starting…" : "Start server"))
+                        {
+                            KimodoServerLauncher.ProbeUrl = b.serverUrl;
+                            KimodoServerLauncher.Start(b.serverUrl, b.model, (ok, _) =>
+                            {
+                                // Connect on its own once it answers: starting it and then having to
+                                // press Connect would be a pointless second step.
+                                if (ok) { KimodoBridgeAutoConnect.Wanted = true; b.Connect(Repaint); }
+                                Repaint();
+                            });
+                            Repaint();
+                        }
+                    using (new EditorGUI.DisabledScope(!running))
+                        if (GUILayout.Button("Stop server")) { KimodoServerLauncher.Stop(); Repaint(); }
+                }
+
+                if (KimodoServerLauncher.Starting)
+                    EditorGUILayout.LabelField("Starting — the first run loads the model, which takes a while.",
+                        EditorStyles.wordWrappedMiniLabel);
+                else if (running)
+                    EditorGUILayout.LabelField(
+                        $"● Running (PID {KimodoServerLauncher.RunningPid})" +
+                        (KimodoServerLauncher.Detached
+                            ? " — started before the last recompile, so its output is no longer captured."
+                            : ""),
+                        EditorStyles.miniLabel);
+                else
+                    EditorGUILayout.LabelField("Not running. You can also start it yourself in a terminal.",
+                        EditorStyles.wordWrappedMiniLabel);
+
+                if (!string.IsNullOrEmpty(KimodoServerLauncher.Problem))
+                    EditorGUILayout.HelpBox(KimodoServerLauncher.Problem, MessageType.Error);
+
+                var log = KimodoServerLauncher.Log;
+                if (log.Count > 0)
+                {
+                    _logFoldout = EditorGUILayout.Foldout(_logFoldout, $"Server output ({log.Count} lines)", true);
+                    if (_logFoldout)
+                    {
+                        _logScroll = EditorGUILayout.BeginScrollView(_logScroll, GUILayout.Height(120f));
+                        // Newest last, like a terminal.
+                        for (int i = 0; i < log.Count; i++)
+                            EditorGUILayout.SelectableLabel(log[i], EditorStyles.miniLabel,
+                                GUILayout.Height(14f));
+                        EditorGUILayout.EndScrollView();
+                    }
+                }
+            }
+        }
+
+        private bool _serverFoldout = true, _logFoldout;
+        private Vector2 _logScroll;
 
         private void DrawModelPicker(KimodoBridge b)
         {

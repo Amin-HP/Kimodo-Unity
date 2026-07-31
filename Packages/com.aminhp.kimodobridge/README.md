@@ -8,6 +8,17 @@ Generate human motion from a text prompt, preview it live on any **Humanoid** ch
 
 > Independent wrapper — **not** affiliated with or endorsed by NVIDIA. Apache-2.0.
 
+## 0. Install
+
+**Window ▸ Package Manager ▸ + ▸ Install package from git URL**:
+
+```
+https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
+```
+
+Add `#v0.2.0` (or any tag) to pin a version. The package is self-contained; the Unity project in that
+repository is only where it is developed.
+
 ## 1. Start the bridge server
 
 Unity talks to a small local server that wraps the Kimodo model.
@@ -21,6 +32,13 @@ Add `-Preload soma` to load the model at startup (otherwise it loads on the firs
 8 GB-VRAM machine it runs the diffusion model on CUDA and the ~8B text encoder on CPU
 (`TEXT_ENCODER_DEVICE=cpu`), so a generation takes tens of seconds. **Restart the server after any
 server change.**
+
+**Or start it from Unity.** On the **KimodoBridge** manager, open *Server process*, point it at your
+`run_bridge.ps1` (remembered per machine, not stored in the scene) and press **Start server**. It runs
+the script in the background, connects by itself once the server answers, and if it cannot start it says
+why — Kimodo missing from the virtual environment, a blocked PowerShell policy, a wrong path, or the port
+already in use. The server's own output is under *Server output*. It keeps running across recompiles
+(and is re-found by its process id), so **Stop server** is how you end it.
 
 ## 2. Set up the character (component workflow)
 

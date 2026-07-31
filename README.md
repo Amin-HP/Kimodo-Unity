@@ -24,13 +24,29 @@ The server returns **pure Kimodo coordinates** (right-handed, Y-up, +Z forward, 
 conversion and all constraint authoring. The model is generated on CUDA; the ~8B text encoder runs on CPU
 so it fits in 8 GB VRAM.
 
+## Install the package
+
+This repository is a Unity *project* (so the package can be developed and tested in place), but the
+package itself is `Packages/com.aminhp.kimodobridge` and installs on its own — nothing else here comes
+with it. In **Window ▸ Package Manager ▸ + ▸ Install package from git URL**:
+
+```
+https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
+```
+
+Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.0`. You still need the Python
+bridge server (below) — the package talks to it over HTTP.
+
 ## Quick start
 
 1. **Server** — install NVIDIA Kimodo (Python 3.10) and run the bridge (see [`Server/`](Server/)):
    ```powershell
    .\run_bridge.ps1              # serves http://127.0.0.1:8765
    ```
-2. **Unity** — open this project (Unity 6, URP). Then:
+   Or let Unity do it: the **KimodoBridge** manager has a **Start server** button — point it at your
+   `run_bridge.ps1` once and it launches the server, reports what went wrong if it cannot, and connects
+   by itself when it is up.
+2. **Unity** — open this project (Unity 6, URP), or install the package into your own. Then:
    - `GameObject ▸ Kimodo ▸ Bridge Manager` → **Connect**.
    - Select a **Humanoid** character → `GameObject ▸ Kimodo ▸ Set Up Selected Character`.
    - On **KimodoGenerator**: prompt → **Generate** → preview → **Bake to AnimationClip**.
@@ -64,7 +80,7 @@ Full usage, constraints, and the runtime API are in the
 
 | Path | What |
 |------|------|
-| `Packages/com.aminhp.kimodobridge/` | The Unity package (runtime + editor). The deliverable. |
+| `Packages/com.aminhp.kimodobridge/` | The Unity package (runtime + editor). The deliverable — this is what the git URL above installs. |
 | `Server/` | The Python FastAPI bridge server (reference; needs NVIDIA Kimodo installed). |
 | `Assets/` | A minimal URP sample project. The test character is not committed. |
 
