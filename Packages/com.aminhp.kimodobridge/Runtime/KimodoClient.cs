@@ -152,12 +152,26 @@ namespace AminHP.KimodoBridge
             return req.result == UnityWebRequest.Result.Success;
         }
 
+        // Assigned by JsonUtility, which the compiler cannot see - hence the pragma.
+#pragma warning disable CS0649
+        [Serializable] private class ErrorBody { public string detail; }
+#pragma warning restore CS0649
+
         private static string DescribeError(UnityWebRequest req)
         {
             string body = req.downloadHandler != null ? req.downloadHandler.text : null;
             string msg = $"{req.error} (HTTP {req.responseCode})";
-            if (!string.IsNullOrEmpty(body)) msg += " — " + body;
-            return msg;
+            if (string.IsNullOrEmpty(body)) return msg;
+
+            // The server answers errors as {"detail": "..."}; show that sentence rather than the raw
+            // JSON, since it is the part that says what to do about it.
+            try
+            {
+                var parsed = JsonUtility.FromJson<ErrorBody>(body);
+                if (parsed != null && !string.IsNullOrEmpty(parsed.detail)) return msg + " — " + parsed.detail;
+            }
+            catch { /* not JSON: fall through and show it as-is */ }
+            return msg + " — " + body;
         }
     }
 }

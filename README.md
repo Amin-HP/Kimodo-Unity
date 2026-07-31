@@ -34,7 +34,7 @@ with it. In **Window ▸ Package Manager ▸ + ▸ Install package from git URL*
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.2`. You still need the Python
+Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.3`. You still need the Python
 bridge server (below) — the package talks to it over HTTP.
 
 ## Quick start

@@ -34,7 +34,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from kimodo import load_model
@@ -66,6 +67,35 @@ _MODELS: dict[str, object] = {}          # resolved_short_key -> model
 _MODEL_LOCK = threading.Lock()           # guards _MODELS mutation + generation
 
 app = FastAPI(title="Kimodo Unity Bridge", version="0.1.0")
+
+
+def _describe_exception(exc: BaseException) -> str:
+    """One line the client can actually act on: what broke, and where in OUR code it broke.
+
+    A bare 500 tells the user nothing — Starlette's default body is the string "Internal Server
+    Error", which is what reaches Unity's error box. The exception type, its message and the last
+    frame inside kimodo/kimodo_bridge are enough to say which part of the request is at fault.
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = ""
+    for f in reversed(frames):
+        path = f.filename.replace("\\", "/")
+        if "/kimodo" in path:
+            where = f" at {path.rsplit('/', 1)[-1]}:{f.lineno} in {f.name}()"
+            break
+    return f"{type(exc).__name__}: {exc}{where}"
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(_request: Request, exc: Exception):
+    """Anything that escapes a handler still comes back as JSON with a reason.
+
+    Without this the client gets a 500 with no body and no way to tell a bad request from a broken
+    model, which is exactly the position a "generation failed, HTTP 500" report leaves everyone in.
+    """
+    traceback.print_exc()
+    _progress_end()
+    return JSONResponse(status_code=500, content={"detail": _describe_exception(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -707,18 +737,24 @@ def load(req: LoadModelRequest) -> dict:
 
 
 @contextlib.contextmanager
-def _per_segment_constraint_weight(model, weights: list[float]):
-    """Give each prompt segment its own constraint guidance strength.
+def _generate_hooks(model, weights: Optional[list[float]], progress_bar):
+    """Shadow ``model._generate`` for the duration of one request.
 
-    Kimodo's ``_multiprompt`` generates one segment at a time, calling ``model._generate(...)``
-    exactly once per segment, in order, and handing each the *same* ``cfg_weight``. There is no
-    public per-segment knob, so for the duration of one request we shadow ``_generate`` with a
-    wrapper that rewrites ``cfg_weight[1]`` (the constraint weight; ``cfg_weight[0]``, the text
-    weight, is left alone) using the Nth entry of ``weights``.
+    Kimodo's ``_multiprompt`` generates one segment at a time, calling ``model._generate(...)`` once
+    per segment. Two things we need are only reachable there:
 
-    Deliberately defensive: if Kimodo ever changes how many times ``_generate`` is called, calls
-    past the end of the list keep the caller's original weight and the mismatch is logged, so the
-    worst case is "the global weight was used" rather than a crash or silently shifted weights.
+    * **per-segment guidance strength** — every segment is handed the *same* ``cfg_weight`` and there
+      is no public knob, so the wrapper rewrites ``cfg_weight[1]`` (the constraint weight;
+      ``cfg_weight[0]``, the text weight, is left alone) with the Nth entry of ``weights``;
+    * **progress** — ``_multiprompt`` accepts a ``progress_bar`` and never passes it on, so the
+      denoising loop always falls back to its own tqdm. The wrapper injects ours instead.
+
+    Both live in ONE wrapper on purpose: as two nested context managers they would each try to
+    restore ``_generate`` on exit, and the inner one's restore would delete the outer one's.
+
+    Deliberately defensive: if Kimodo ever changes how many times ``_generate`` is called, calls past
+    the end of ``weights`` keep the caller's own weight and the mismatch is logged, so the worst case
+    is "the global weight was used" rather than a crash or silently shifted weights.
     """
     original = model._generate
     had_own = "_generate" in model.__dict__
@@ -727,10 +763,13 @@ def _per_segment_constraint_weight(model, weights: list[float]):
     def wrapped(*args, **kwargs):
         i = state["calls"]
         state["calls"] += 1
-        cw = kwargs.get("cfg_weight")
-        if i < len(weights) and isinstance(cw, (list, tuple)) and len(cw) == 2:
-            kwargs = dict(kwargs)
-            kwargs["cfg_weight"] = [cw[0], float(weights[i])]
+        kwargs = dict(kwargs)
+        if weights:
+            cw = kwargs.get("cfg_weight")
+            if i < len(weights) and isinstance(cw, (list, tuple)) and len(cw) == 2:
+                kwargs["cfg_weight"] = [cw[0], float(weights[i])]
+        if progress_bar is not None and "progress_bar" not in kwargs:
+            kwargs["progress_bar"] = progress_bar
         return original(*args, **kwargs)
 
     model._generate = wrapped
@@ -741,7 +780,7 @@ def _per_segment_constraint_weight(model, weights: list[float]):
             model._generate = original
         else:
             model.__dict__.pop("_generate", None)
-        if state["calls"] != len(weights):
+        if weights and state["calls"] != len(weights):
             print(
                 f"[kimodo-bridge] per-segment constraint weights: expected {len(weights)} segment "
                 f"generations but saw {state['calls']}; some segments used the global weight."
@@ -829,13 +868,10 @@ def generate(req: GenerateRequest) -> dict:
             seg_weights = [float(w) for w in seg_weights]
 
         _progress_begin(len(texts))
+        bar = _progress_bar()
         try:
             with torch.no_grad():
-                with (
-                    _per_segment_constraint_weight(model, seg_weights)
-                    if seg_weights
-                    else contextlib.nullcontext()
-                ):
+                with _generate_hooks(model, seg_weights, bar):
                     output = model(
                         texts,
                         num_frames,
@@ -850,19 +886,37 @@ def generate(req: GenerateRequest) -> dict:
                         first_heading_angle=(
                             float(req.first_heading_angle) if req.has_first_heading else None
                         ),
-                        progress_bar=_progress_bar(),
+                        progress_bar=bar,   # only reached on the single-prompt path
                     )
         except Exception as exc:  # noqa: BLE001 - surface the real error to the client + logs
             _progress_end()
             traceback.print_exc()
-            n_con = len(constraint_lst)
+            kinds = ", ".join(sorted({str(c.get("type")) for c in (req.constraints or [])})) or "none"
             raise HTTPException(
                 status_code=500,
-                detail=f"model() failed ({type(exc).__name__}: {exc}); constraints={n_con}, "
-                f"frames={sum(num_frames)}, samples={req.num_samples}. See server console for traceback.",
+                detail=f"model() failed — {_describe_exception(exc)}. Request: {len(texts)} segment(s), "
+                f"{sum(num_frames)} frames, {req.num_samples} sample(s), {len(constraint_lst)} "
+                f"constraint(s) [{kinds}], postprocess={use_postprocess}. Full traceback in the "
+                f"server console.",
             ) from exc
 
         _progress_end()
+        try:
+            return _build_response(req, resolved, skel, root_idx, output, num_frames, texts, t_start, fps)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Building the response failed — {_describe_exception(exc)}.",
+            ) from exc
+
+
+def _build_response(req, resolved, skel, root_idx, output, num_frames, texts, t_start, fps) -> dict:
+    """Turn the model output into the JSON the client expects (kept separate so a failure here is
+    reported as such rather than as a generation failure)."""
+    with torch.no_grad():
         bones = _skeleton_bones(skel)
 
         posed = output["posed_joints"]        # [B, T, J, 3]

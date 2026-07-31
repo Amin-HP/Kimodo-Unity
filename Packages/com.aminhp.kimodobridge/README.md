@@ -16,7 +16,7 @@ Generate human motion from a text prompt, preview it live on any **Humanoid** ch
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Add `#v0.2.2` (or any tag) to pin a version. The package is self-contained; the Unity project in that
+Add `#v0.2.3` (or any tag) to pin a version. The package is self-contained; the Unity project in that
 repository is only where it is developed.
 
 ## 1. Start the bridge server

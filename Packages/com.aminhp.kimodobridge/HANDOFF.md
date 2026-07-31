@@ -649,6 +649,13 @@ A generate takes about a minute and showed nothing but "Generating…". Kimodo's
 **`progress_bar` callable that wraps the step iterator** (`kimodo_model.py`: `for i in
 progress_bar(indices)`) — a real hook, so this is measured rather than estimated.
 
+- **`_multiprompt` accepts a `progress_bar` and never forwards it** to `_generate` (only the
+  single-prompt path in `__call__` does), so passing it to `model(...)` did nothing on the path the
+  bridge actually uses — the denoising loop kept its own tqdm and the bar sat at "encoding". It is
+  injected by shadowing `model._generate` instead, which is also where per-segment constraint weights
+  are applied: **`_generate_hooks(model, weights, bar)` does BOTH in one wrapper**, because two nested
+  context managers would each restore `_generate` on exit and the inner one would delete the outer's.
+  (It replaced `_per_segment_constraint_weight`.)
 - Server: `_PROGRESS` (+ its own lock) and `GET /progress`. `_progress_bar()` returns a generator that
   stands in for tqdm, recording the step as it yields. **It must not take `_MODEL_LOCK`** — `/generate`
   holds that for the whole request, and FastAPI runs sync endpoints in a threadpool, so `/progress`
@@ -665,6 +672,25 @@ progress_bar(indices)`) — a real hook, so this is measured rather than estimat
   `Busy`, then `InternalEditorUtility.RepaintAllViews()`. Bars are drawn in the generator inspector and
   in the Timeline toolbar next to the Generate button. An older server without `/progress` leaves
   `Progress01` at -1 and the bar reads "Working…" rather than inventing a number.
+
+## 7l. Errors say what broke (2026-07-31)
+
+A user report of "generation failed, HTTP 500" could not be diagnosed: Starlette answers an unhandled
+exception with the plain string "Internal Server Error", so nothing about the cause reached Unity, and
+five reconstructed request shapes (plain / first_heading / segment weights / boundary constraints / the
+whole frozen-path request) all returned 200 against the live server. So the failure was made
+self-reporting instead of guessed at:
+
+- `_describe_exception()` — type, message, and the last frame **inside kimodo/kimodo_bridge**, which is
+  the part that says which stage is at fault.
+- `@app.exception_handler(Exception)` returns that as JSON `{"detail": …}` (and clears the progress
+  state) so nothing can come back as a bodyless 500 again.
+- `/generate`'s own handler adds the request shape — segment count, frames, samples, constraint count
+  and types, postprocess — since the shape is usually what distinguishes a failing request.
+- Response building moved into `_build_response(...)` so a failure there is reported as such rather
+  than as "model() failed". **Watch the arguments**: `fps` is computed in `generate()` and had to be
+  passed in; the refactor briefly left it as a NameError, caught by the end-to-end run.
+- Unity: `DescribeError` now parses `{"detail": …}` and shows that sentence instead of raw JSON.
 
 ## 8. Known issues / open work
 
