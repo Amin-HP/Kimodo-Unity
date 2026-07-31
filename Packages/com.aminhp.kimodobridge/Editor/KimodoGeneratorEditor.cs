@@ -116,10 +116,23 @@ namespace AminHP.KimodoBridge.Editor
                 if (GUILayout.Button(label, GUILayout.Height(30)))
                     g.Generate(Repaint);
             }
+            if (g.Busy) DrawProgress(g);
             if (!string.IsNullOrEmpty(g.Info))
                 EditorGUILayout.HelpBox(g.Info, g.Busy ? MessageType.Info : MessageType.None);
-            if (g.Busy)
-                EditorGUILayout.LabelField("On this machine generation can take ~1 min (CPU text encoder).", EditorStyles.wordWrappedMiniLabel);
+        }
+
+        /// <summary>Where the generation has got to, straight from the server (see
+        /// KimodoProgressPoller). Before the model reports anything there is no honest number to show,
+        /// so it says what it is doing instead of drawing a bar that is not measuring anything.</summary>
+        internal static void DrawProgress(KimodoGenerator g)
+        {
+            var rect = EditorGUILayout.GetControlRect(false, 18f);
+            if (g.Progress01 >= 0f)
+                EditorGUI.ProgressBar(rect, g.Progress01,
+                    $"{Mathf.RoundToInt(g.Progress01 * 100f)}%  {g.ProgressLabel}");
+            else
+                EditorGUI.ProgressBar(rect, 0f,
+                    string.IsNullOrEmpty(g.ProgressLabel) ? "Working…" : g.ProgressLabel);
         }
 
         private void DrawPreview(KimodoGenerator g)

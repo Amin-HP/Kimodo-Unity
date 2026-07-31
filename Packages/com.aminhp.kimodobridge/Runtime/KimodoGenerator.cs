@@ -62,6 +62,10 @@ namespace AminHP.KimodoBridge
         [NonSerialized] public KimodoPlayer Preview;
         [NonSerialized] public bool Busy;
         [NonSerialized] public string Info = "";
+        // Filled in while Busy by KimodoProgressPoller, from the server's /progress. -1 = not known
+        // yet (an older server, or the request has not reached the model).
+        [NonSerialized] public float Progress01 = -1f;
+        [NonSerialized] public string ProgressLabel = "";
         [NonSerialized] public float PreviewTime;   // shared with the editors (playback head)
         [NonSerialized] public bool Playing;
         [NonSerialized] public float PlaybackSpeed = 1f;   // editor playback rate (see KimodoPlayback)
@@ -152,6 +156,7 @@ namespace AminHP.KimodoBridge
                     {
                         if (!this) return;
                         Busy = false;
+                        ClearProgress();
                         if (!ok) { Info = "Generation failed: " + err; onDone?.Invoke(); return; }
                         AdoptMotion(motion, " (frozen segments kept)");
                         onDone?.Invoke();
@@ -184,6 +189,7 @@ namespace AminHP.KimodoBridge
                 Busy = false;
                 if (!ok)
                 {
+                    ClearProgress();
                     Info = "Generation failed: " + err;
                     onDone?.Invoke();
                     return;
@@ -207,8 +213,12 @@ namespace AminHP.KimodoBridge
             return built;
         }
 
+        /// <summary>Clear the progress readout (a generate finished, failed, or never started).</summary>
+        public void ClearProgress() { Progress01 = -1f; ProgressLabel = ""; }
+
         private void AdoptMotion(KimodoMotion motion, string note)
         {
+            ClearProgress();
             Motion = motion;
             clipIndex = 0;
             PreviewTime = 0f;

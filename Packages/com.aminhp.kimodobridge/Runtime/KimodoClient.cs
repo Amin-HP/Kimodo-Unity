@@ -32,6 +32,15 @@ namespace AminHP.KimodoBridge
             return req;
         }
 
+        // --- GET /progress --- (answers while /generate is still working)
+        public UnityWebRequest GetProgress(Action<bool, KimodoProgress, string> onDone)
+        {
+            var req = UnityWebRequest.Get(BaseUrl + "/progress");
+            req.timeout = 5;
+            SendJson(req, onDone);
+            return req;
+        }
+
         // --- GET /models ---
         public UnityWebRequest GetModels(Action<bool, KimodoModelList, string> onDone)
         {

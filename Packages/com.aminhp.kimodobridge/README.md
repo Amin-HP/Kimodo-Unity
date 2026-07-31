@@ -16,7 +16,7 @@ Generate human motion from a text prompt, preview it live on any **Humanoid** ch
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Add `#v0.2.1` (or any tag) to pin a version. The package is self-contained; the Unity project in that
+Add `#v0.2.2` (or any tag) to pin a version. The package is self-contained; the Unity project in that
 repository is only where it is developed.
 
 ## 1. Start the bridge server
@@ -56,6 +56,11 @@ Everything is driven by components you add from the **GameObject ▸ Kimodo** me
    it to the bridge.
 3. On **KimodoGenerator**: enter a prompt + duration → **Generate** → play / scrub the preview →
    **Bake to AnimationClip** to save a reusable humanoid `.anim`.
+
+While it generates, a **progress bar** shows where the model has got to — in the generator and in the
+Timeline toolbar. It is the server's real position in its denoising loop (per segment, for a
+multi-prompt shot), not a guess from elapsed time; encoding the prompt is called out separately because
+on a CPU text encoder it takes a while and has nothing to count.
 
 The generated motion is **kept across script compiles, play mode and Unity restarts** — it is cached in
 `Library/KimodoMotionCache/`, so you do not have to regenerate (or bake early) just because Unity

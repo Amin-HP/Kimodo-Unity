@@ -6,9 +6,11 @@
 > `kimodo-setup.md` — how Kimodo is installed).
 
 Last updated: 2026-07-31. Owner/brand: **AminHP** (independent wrapper — *not* affiliated with NVIDIA).
-Published: **https://github.com/Amin-HP/Kimodo-Unity** (branch `main`, currently private). The repo bundles a
-copy of the Python server under `Server/` — **re-sync it from the live `H:\kimodo\kimodo\kimodo_bridge\server.py`
-before each push** (see the `kimodo-github-repo` memory).
+Published: **https://github.com/Amin-HP/Kimodo-Unity** (branch `main`, currently private). The package
+ships the Python server at `Packages/com.aminhp.kimodobridge/Server~/kimodo_bridge/` — **re-sync it from
+the live `H:\kimodo\kimodo\kimodo_bridge\server.py` before each push** (see the `kimodo-github-repo`
+memory). The old duplicate at the repo root (`Server/`) was removed once the package started shipping
+and running its own copy, so there are two copies to keep in step, not three.
 
 **Read §7e–§7i first if you are picking this up now**: the constraint system, its editing UX and the
 freeze feature were all reworked on 2026-07-31, and the older sections describe what came before.
@@ -65,8 +67,10 @@ Unity Editor (C#) ──HTTP/JSON──► Bridge server (FastAPI) ──► Kim
 - `server.py` — FastAPI app. `GET /health`, `GET /models`, `GET /skeleton`, `POST /load_model`, `POST /generate`.
   `GET /skeleton?model=` returns the rest bone list (no motion) so the client can author + draw constraints BEFORE
   the first generate. `_get_or_load_model` caches by resolved short-key (MUST reuse — reload re-loads the ~8B encoder).
-  Constraint machinery (see §7). Launcher `..\run_bridge.ps1`. `__main__.py`, `__init__.py`.
-  **This is the live server.** A snapshot lives in the GitHub repo under `Server/` — keep it in sync (see header).
+  Constraint machinery (see §7). Launcher `..\run_bridge.ps1` (only for running it by hand — Unity runs
+  the module directly, §7j). `__main__.py`, `__init__.py`. `GET /progress` reports how far a generation
+  in flight has got (§7k). **This is the live server.** The shipped copy is
+  `Packages/com.aminhp.kimodobridge/Server~/kimodo_bridge/` — keep it in sync (see header).
 
 ### Unity package — `H:\kimodo\Kimodo Unity\Packages\com.aminhp.kimodobridge\`
 Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`**. Asmdefs
@@ -108,6 +112,8 @@ Namespaces **`AminHP.KimodoBridge`** (runtime) / **`AminHP.KimodoBridge.Editor`*
 - `KimodoConstraintOverlay.cs` — the Scene-view **Overlay** with the editing tools + key navigation (§7f).
 - `KimodoMotionRestore.cs` — `[InitializeOnLoad]`; puts each character's cached motion back after a
   domain reload or a scene open (§7i).
+- `KimodoProgressPoller.cs` — `[InitializeOnLoad]`; polls `/progress` while a character is generating
+  and writes it onto the generator for the two progress bars (§7k).
 - `KimodoServerLauncher.cs` — runs / stops `run_bridge.ps1` from the Bridge inspector (§7j).
 - `KimodoMenu.cs` — the `GameObject ▸ Kimodo ▸ …` menu items.
   (The legacy all-in-one `KimodoBridgeWindow.cs` was **removed** in the v0.1.0 cleanup — component workflow only.)
@@ -637,6 +643,29 @@ domain reload — script compile, entering play mode, restart — threw away a m
   to pin). Only the package folder is fetched — the sample project does not come with it. Documented in
   both READMEs; releases are tagged `vX.Y.Z` so the pin has something to point at.
 
+## 7k. Generation progress (2026-07-31; server change ⇒ RESTART BRIDGE)
+
+A generate takes about a minute and showed nothing but "Generating…". Kimodo's denoising loop takes a
+**`progress_bar` callable that wraps the step iterator** (`kimodo_model.py`: `for i in
+progress_bar(indices)`) — a real hook, so this is measured rather than estimated.
+
+- Server: `_PROGRESS` (+ its own lock) and `GET /progress`. `_progress_bar()` returns a generator that
+  stands in for tqdm, recording the step as it yields. **It must not take `_MODEL_LOCK`** — `/generate`
+  holds that for the whole request, and FastAPI runs sync endpoints in a threadpool, so `/progress`
+  answers while generation is still running (verified with a TestClient reading it from another thread).
+- **Multi-prompt runs one denoising loop per segment**, so the fraction is
+  `(segment + step/steps) / segments`. Segments are counted by counting *loops*, not by looking at the
+  phase: the first version tested `phase == "denoising"` to detect a new segment, but the previous loop
+  had already moved the phase to "postprocess", so it never advanced past segment 0 and the bar stalled
+  at 50 %. Caught by a standalone test before it ever ran against the model.
+- The text encoder runs **before** the first loop and on CPU is a large slice of the wall clock, with no
+  step count to report. That phase says "encoding the prompt" rather than sitting at 0 % of denoising.
+- Unity: `KimodoProgress` DTO + `KimodoClient.GetProgress`, `KimodoGenerator.Progress01`/`ProgressLabel`
+  (`-1` = unknown), and `Editor/KimodoProgressPoller.cs` polling twice a second while any generator is
+  `Busy`, then `InternalEditorUtility.RepaintAllViews()`. Bars are drawn in the generator inspector and
+  in the Timeline toolbar next to the Generate button. An older server without `/progress` leaves
+  `Progress01` at -1 and the bar reads "Working…" rather than inventing a number.
+
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +
@@ -659,6 +688,8 @@ domain reload — script compile, entering play mode, restart — threw away a m
   boundary constraints get it close, but no crossfade is applied.
 - **The server launcher (§7j) is untested on macOS/Linux.** It no longer uses any shell, so the code
   path is the same everywhere, but only the Windows path has actually been run.
+- **Progress during a frozen-timeline generate** (§7h + §7k) is per request: the bar restarts for each
+  live run, and the run number is in the status text next to it rather than folded into one percentage.
 - **Motion cache** (§7i) has no size limit and is never swept: one file per generator in
   `Library/KimodoMotionCache/`, replaced on each Generate, orphaned if a character is deleted. Deleting
   the folder is always safe.

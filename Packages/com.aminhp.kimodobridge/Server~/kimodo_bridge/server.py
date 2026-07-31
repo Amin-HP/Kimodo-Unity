@@ -573,8 +573,86 @@ def _load_constraints(con_dicts: list[dict], skeleton) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Generation progress
+#
+# A generate call takes tens of seconds, and until it returns the client has nothing to show. Kimodo's
+# own denoising loop takes a `progress_bar` callable that wraps the step iterator (kimodo_model.py:
+# `for i in progress_bar(indices)`), which is a real hook rather than a guess, so we pass one that
+# records where it is. /progress then reports it.
+#
+# Two details worth knowing when reading the numbers:
+#   * multi-prompt generation runs ONE denoising loop per segment, so progress is (segment + step/steps)
+#     over the segment count;
+#   * before the first loop the text encoder runs, which on CPU is a big slice of the wall clock. That
+#     phase reports as "encoding" with no step count, rather than pretending to be at 0 % of denoising.
+# ---------------------------------------------------------------------------
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS = {
+    "running": False,
+    "phase": "idle",      # idle | encoding | denoising | postprocess
+    "segment": 0,         # 0-based, of segments
+    "segments": 0,
+    "step": 0,            # within the current segment
+    "steps": 0,
+    "loops": 0,           # denoising loops seen so far == segments started
+    "startedAt": 0.0,
+}
+
+
+def _progress_begin(segments: int) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS.update(
+            running=True, phase="encoding", segment=0, segments=max(1, segments),
+            step=0, steps=0, loops=0, startedAt=time.time(),
+        )
+
+
+def _progress_end() -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS.update(running=False, phase="idle", step=0, steps=0)
+
+
+def _progress_bar():
+    """A stand-in for tqdm: wraps the denoising step iterator and records the position.
+
+    Kimodo only ever uses the return value as an iterable, so a generator is enough. Each call marks
+    the start of another segment's denoising loop.
+    """
+    def bar(iterable, *_args, **_kwargs):
+        steps = list(iterable)
+        with _PROGRESS_LOCK:
+            # Count the loops rather than looking at the phase: by the time the next segment starts,
+            # the previous loop has already moved the phase on, so a phase test never advanced past
+            # segment 0 and the bar stalled halfway.
+            _PROGRESS["loops"] += 1
+            _PROGRESS["segment"] = min(_PROGRESS["loops"] - 1, _PROGRESS["segments"] - 1)
+            _PROGRESS.update(phase="denoising", step=0, steps=len(steps))
+        for i, value in enumerate(steps):
+            with _PROGRESS_LOCK:
+                _PROGRESS["step"] = i
+            yield value
+        with _PROGRESS_LOCK:
+            _PROGRESS["step"] = len(steps)
+            _PROGRESS["phase"] = "postprocess"
+    return bar
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@app.get("/progress")
+def progress() -> dict:
+    """How far the generation in flight has got. Cheap and lock-free with respect to _MODEL_LOCK, so it
+    answers while /generate is still working."""
+    with _PROGRESS_LOCK:
+        p = dict(_PROGRESS)
+    steps, segments = p["steps"], max(1, p["segments"])
+    done = (p["segment"] + (p["step"] / steps if steps else 0.0)) / segments
+    p["fraction"] = round(min(1.0, max(0.0, done)), 4) if p["running"] else 0.0
+    p["elapsed"] = round(time.time() - p["startedAt"], 1) if p["running"] else 0.0
+    return p
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -750,6 +828,7 @@ def generate(req: GenerateRequest) -> dict:
                 )
             seg_weights = [float(w) for w in seg_weights]
 
+        _progress_begin(len(texts))
         try:
             with torch.no_grad():
                 with (
@@ -771,8 +850,10 @@ def generate(req: GenerateRequest) -> dict:
                         first_heading_angle=(
                             float(req.first_heading_angle) if req.has_first_heading else None
                         ),
+                        progress_bar=_progress_bar(),
                     )
         except Exception as exc:  # noqa: BLE001 - surface the real error to the client + logs
+            _progress_end()
             traceback.print_exc()
             n_con = len(constraint_lst)
             raise HTTPException(
@@ -781,6 +862,7 @@ def generate(req: GenerateRequest) -> dict:
                 f"frames={sum(num_frames)}, samples={req.num_samples}. See server console for traceback.",
             ) from exc
 
+        _progress_end()
         bones = _skeleton_bones(skel)
 
         posed = output["posed_joints"]        # [B, T, J, 3]

@@ -419,6 +419,20 @@ namespace AminHP.KimodoBridge.Editor
                     if (GUILayout.Button(busy ? "Generating…" : "▶ Generate", EditorStyles.toolbarButton, GUILayout.Width(90)))
                         Defer(() => _gen.Generate(Repaint));
 
+                // While it runs, the button's usual neighbours are useless — put the progress where the
+                // eye already is instead of in a corner of the window.
+                if (busy)
+                {
+                    var bar = GUILayoutUtility.GetRect(160f, 16f, GUILayout.Width(160f));
+                    bar.y += 1f; bar.height -= 2f;
+                    if (_gen.Progress01 >= 0f)
+                        EditorGUI.ProgressBar(bar, _gen.Progress01,
+                            $"{Mathf.RoundToInt(_gen.Progress01 * 100f)}%  {_gen.ProgressLabel}");
+                    else
+                        EditorGUI.ProgressBar(bar, 0f,
+                            string.IsNullOrEmpty(_gen.ProgressLabel) ? "Working…" : _gen.ProgressLabel);
+                }
+
                 using (new EditorGUI.DisabledScope(_gen == null || _gen.Motion == null))
                     if (GUILayout.Button("Bake…", EditorStyles.toolbarButton, GUILayout.Width(52)))
                         Defer(Bake);

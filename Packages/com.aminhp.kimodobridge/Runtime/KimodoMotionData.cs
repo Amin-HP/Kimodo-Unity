@@ -18,6 +18,21 @@ namespace AminHP.KimodoBridge
         public string defaultModel;
     }
 
+    // ----- /progress -----
+    // How far the generation in flight has got. `fraction` is the whole request, 0..1; `phase` is
+    // "encoding" (the text encoder, which on CPU is a real slice of the wall clock and has no step
+    // count), "denoising", or "postprocess".
+    [Serializable]
+    public class KimodoProgress
+    {
+        public bool running;
+        public string phase;
+        public int segment, segments;   // multi-prompt runs one denoising loop per segment
+        public int step, steps;
+        public float fraction;
+        public float elapsed;           // seconds since the request started
+    }
+
     // ----- /models -----
     [Serializable]
     public class KimodoModelInfo
