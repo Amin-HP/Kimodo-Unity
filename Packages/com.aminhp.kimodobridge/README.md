@@ -47,7 +47,7 @@ The server does **not** have to be on the machine running Unity — see
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.6`.
+Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.7`.
 
 Only the package is fetched; the Unity project in that repository is just where it is developed.
 

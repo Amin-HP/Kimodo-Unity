@@ -35,7 +35,10 @@ namespace AminHP.KimodoBridge
         public string duration = "4.0";
 
         [Header("Sampling")]
-        [Range(1, 8)] public int numSamples = 1;
+        [Tooltip("How many variations one Generate returns. The editor always asks for one: extra " +
+                 "samples cost a full generation each, and everything downstream — preview, bake, " +
+                 "frozen timeline segments — works on a single clip. Kept for code that wants a batch.")]
+        [HideInInspector] [Range(1, 8)] public int numSamples = 1;
         [Range(10, 200)] public int diffusionSteps = 100;
         public bool useSeed = false;
         public int seed = 0;
@@ -171,7 +174,7 @@ namespace AminHP.KimodoBridge
                 prompt = EffectivePrompt,
                 model = b.model,
                 duration = EffectiveDuration,
-                num_samples = numSamples,
+                num_samples = Mathf.Max(1, numSamples),
                 diffusion_steps = diffusionSteps,
                 seed = useSeed ? seed : -1,
                 postprocess = postprocess,

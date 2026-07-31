@@ -20,7 +20,7 @@ ordinary `AnimationClip` that needs none of this at runtime.
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.6`. Only the package folder is
+Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.7`. Only the package folder is
 fetched — the Unity project in this repository is just where it is developed.
 
 You also need **Python 3.10 with [Kimodo](https://github.com/nv-tlabs/kimodo) installed** and a CUDA GPU

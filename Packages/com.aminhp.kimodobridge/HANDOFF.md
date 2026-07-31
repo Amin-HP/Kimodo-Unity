@@ -708,6 +708,21 @@ self-reporting instead of guessed at:
   passed in; the refactor briefly left it as a NameError, caught by the end-to-end run.
 - Unity: `DescribeError` now parses `{"detail": …}` and shows that sentence instead of raw JSON.
 
+## 7m. Two small editor fixes (2026-07-31)
+
+- **The position gizmo grew without bound while dragging a hand/foot.** The handle is anchored to the
+  live drag value (§7f rule 2) so an IK clamp cannot drag it backwards, but that anchor was only
+  released on `EventType.MouseUp` — which the handle itself consumes, and which never arrives at all if
+  the mouse comes up over another Scene view or outside one. The stale anchor was then reused as the
+  START of the next drag, so drags compounded, the handle marched away from the camera and
+  `HandleUtility.GetHandleSize` scaled it up with the distance. **`GUIUtility.hotControl == 0` is the
+  authoritative "nothing is being dragged"** and now releases it, with two guards behind that: a
+  non-finite anchor (a degenerate IK solve can produce one) and an anchor more than 10 m from the joint
+  are both discarded, since a limb reaches under a metre.
+- **The Samples slider is gone** from the generator: extra samples cost a full generation each, and
+  preview, bake and frozen segments all work on one clip. `numSamples` stays as a `[HideInInspector]`
+  field for code that wants a batch, and the request sends `Mathf.Max(1, numSamples)`.
+
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +

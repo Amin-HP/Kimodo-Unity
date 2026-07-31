@@ -320,7 +320,13 @@ namespace AminHP.KimodoBridge.Editor
             var motion = g.PoseSkeleton;   // real motion, or the rest skeleton before the first generate
 
             // A drag ends on mouse-up wherever it happens, so handles re-anchor to the real pose.
-            if (_dragging && Event.current.type == EventType.MouseUp) _dragging = false;
+            // A drag is over as soon as no handle is hot. MouseUp alone is not enough: the handle
+            // consumes it, and one delivered to another Scene view never arrives here — the anchor
+            // would then survive into the NEXT drag and be used as its starting point, so each drag
+            // added to the last, the handle marched away from the camera, and GetHandleSize scaled it
+            // up with the distance. That is the gizmo that "grows".
+            if (_dragging && (GUIUtility.hotControl == 0 || Event.current.type == EventType.MouseUp))
+                _dragging = false;
 
             // Make sure every shown key has an authored pose (so both the skeleton and the ghost
             // mesh have something to draw), then update the transparent ghost copies.
@@ -422,7 +428,9 @@ namespace AminHP.KimodoBridge.Editor
                               KimodoEditState.SelectedJoint == motion.rootIndex;
             if (Tool == KimodoTool.MovePose || rootPicked)
             {
-                Vector3 anchor = _dragging && _dragJoint == int.MinValue ? _dragPos : W(motion.rootIndex);
+                bool liveDrag = _dragging && _dragJoint == int.MinValue &&
+                                !float.IsNaN(_dragPos.x) && !float.IsInfinity(_dragPos.x);
+                Vector3 anchor = liveDrag ? _dragPos : W(motion.rootIndex);
                 EditorGUI.BeginChangeCheck();
                 Vector3 newRootW = Handles.PositionHandle(anchor, Quaternion.identity);
                 if (EditorGUI.EndChangeCheck())

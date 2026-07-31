@@ -43,13 +43,32 @@ namespace AminHP.KimodoBridge.Editor
         private int _mapSig = int.MinValue;
         private KimodoPoseGhosts _ghosts;
 
-        // Live drag (rule 2). Anchored in world space; released on mouse-up.
+        // Live drag (rule 2). Anchored in world space; released as soon as no handle is hot.
         private bool _dragging;
         private int _dragJoint = -1;
         private Vector3 _dragPos;
         private Quaternion _dragRot;
 
         private static KimodoTool Tool => KimodoEditState.Tool(KimodoKeyKind.EndEffector);
+
+        /// <summary>Where the handle is drawn from: the live drag value while this joint is being
+        /// dragged, otherwise where the joint actually is. A non-finite drag value — a degenerate IK
+        /// solve can produce one — is discarded instead of being fed back into the handle, where it
+        /// would put the gizmo at an unreachable distance and blow up its screen size.</summary>
+        private Vector3 DragAnchor(int joint, Vector3 fallback)
+        {
+            if (!_dragging || _dragJoint != joint) return fallback;
+            if (!IsFinite(_dragPos)) { _dragging = false; return fallback; }
+            // A limb reaches under a metre, so an anchor tens of metres from the joint is not a big
+            // drag — it is the handle compounding its own output. Bound it rather than let it run off
+            // toward the horizon, where the handle is drawn ever larger.
+            if ((_dragPos - fallback).sqrMagnitude > 100f) { _dragging = false; return fallback; }
+            return _dragPos;
+        }
+
+        private static bool IsFinite(Vector3 v) =>
+            !float.IsNaN(v.x) && !float.IsNaN(v.y) && !float.IsNaN(v.z) &&
+            !float.IsInfinity(v.x) && !float.IsInfinity(v.y) && !float.IsInfinity(v.z);
 
         private void OnDisable() { _ghosts?.Dispose(); _ghosts = null; }
 
@@ -292,7 +311,13 @@ namespace AminHP.KimodoBridge.Editor
             var sk = g.PoseSkeleton;
 
             // A drag ends on mouse-up wherever it happens, so handles re-anchor to the real pose.
-            if (_dragging && Event.current.type == EventType.MouseUp) _dragging = false;
+            // A drag is over as soon as no handle is hot. MouseUp alone is not enough: the handle
+            // consumes it, and one delivered to another Scene view never arrives here — the anchor
+            // would then survive into the NEXT drag and be used as its starting point, so each drag
+            // added to the last, the handle marched away from the camera, and GetHandleSize scaled it
+            // up with the distance. That is the gizmo that "grows".
+            if (_dragging && (GUIUtility.hotControl == 0 || Event.current.type == EventType.MouseUp))
+                _dragging = false;
 
             KimodoEditState.ResolveFollow(g);
             int selected = KimodoEditState.IndexFor(e, e.targets.Count);
@@ -387,7 +412,7 @@ namespace AminHP.KimodoBridge.Editor
                 int j = kv.Value;
                 if (Tool == KimodoTool.MoveLimb)
                 {
-                    Vector3 anchor = _dragging && _dragJoint == j ? _dragPos : W(j);
+                    Vector3 anchor = DragAnchor(j, W(j));
                     EditorGUI.BeginChangeCheck();
                     Vector3 np = Handles.PositionHandle(anchor, Quaternion.identity);
                     if (EditorGUI.EndChangeCheck())
@@ -484,7 +509,7 @@ namespace AminHP.KimodoBridge.Editor
             if (!selected || Tool != KimodoTool.MoveLimb) return;
             foreach (var kv in L.effectors)
             {
-                Vector3 want = _dragging && _dragJoint == kv.Value ? _dragPos : W(kv.Value);
+                Vector3 want = DragAnchor(kv.Value, W(kv.Value));
                 if (e.ReachDeficit(t, kv.Key, KimodoRootMap.WorldToKimodo(want, _map)) <= 0.005f) continue;
                 Handles.color = Color.yellow;
                 Handles.DrawDottedLine(W(kv.Value), want, 4f);

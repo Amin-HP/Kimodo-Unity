@@ -88,7 +88,6 @@ namespace AminHP.KimodoBridge.Editor
                 prompt = EditorGUILayout.TextArea(g.prompt, GUILayout.MinHeight(44));
                 duration = EditorGUILayout.TextField(new GUIContent("Duration (s)", "Seconds; space-separated for one per segment."), g.duration);
             }
-            int numSamples = EditorGUILayout.IntSlider("Samples", g.numSamples, 1, 8);
             int steps = EditorGUILayout.IntSlider("Diffusion steps", g.diffusionSteps, 10, 200);
             bool useSeed, postprocess;
             int seed = g.seed;
@@ -103,7 +102,7 @@ namespace AminHP.KimodoBridge.Editor
             if (EditorGUI.EndChangeCheck())
             {
                 Undo.RecordObject(g, "Edit Kimodo prompt");
-                g.prompt = prompt; g.duration = duration; g.numSamples = numSamples;
+                g.prompt = prompt; g.duration = duration;
                 g.diffusionSteps = steps; g.useSeed = useSeed; g.seed = seed; g.postprocess = postprocess;
                 g.constraintWeight = cw;
             }
