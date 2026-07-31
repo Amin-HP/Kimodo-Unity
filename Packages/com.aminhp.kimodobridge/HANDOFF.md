@@ -637,6 +637,12 @@ domain reload — script compile, entering play mode, restart — threw away a m
   set once (URL, Python, server folder, CPU text encoder) moved behind a **Setup** foldout that opens
   itself while Python is unset or something failed; the server output has its own foldout so a model
   load cannot bury the controls.
+- **A server is shared, not owned by a project.** The tracked PID only covers servers *this* project
+  started, so a second Unity project saw "Server not running" while one was plainly answering, and
+  pressing Start collided on the port. `Start()` now probes `/health` first and adopts whatever is
+  already serving the URL; the inspector distinguishes ours (PID) from `external` (online with no PID
+  of ours) and offers no Stop for the latter, since it is not ours to stop. A Connect that goes green
+  instantly, model included, is the correct outcome of adopting a warm server — not a stale UI.
 - **Stopping the server clears the connection UI.** "Connected" is not a live socket — it only means a
   past `/health` answered — so nothing contradicted the green dots when the server went away.
   `KimodoServerLauncher.Stopped` now fires on Stop and on an unexpected exit;

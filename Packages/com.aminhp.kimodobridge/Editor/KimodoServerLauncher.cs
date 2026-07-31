@@ -191,12 +191,33 @@ namespace AminHP.KimodoBridge.Editor
         public static bool Detached => IsRunning && _proc == null;
 
         // -----------------------------------------------------------------------------------------
-        /// <summary>Launch the bridge. <paramref name="onReady"/> fires once /health answers, or with
-        /// false when it gives up / the process dies first.</summary>
+        /// <summary>Make sure a server is serving this URL, then report back. <paramref name="onReady"/>
+        /// fires once /health answers, or with false when it gives up / the process dies first.
+        ///
+        /// It does NOT blindly launch one. The PID we track only covers servers *this project* started,
+        /// so another Unity project — or a terminal — can already be serving the port, and starting a
+        /// second one would only collide on it. If something already answers, that one is adopted.</summary>
         public static void Start(string serverUrl, string preloadModel, Action<bool, string> onReady = null)
         {
             if (IsRunning) { onReady?.Invoke(true, "The server is already running."); return; }
 
+            ProbeUrl = serverUrl;
+            new KimodoClient(serverUrl).GetHealth((alive, _, __) =>
+            {
+                if (alive)
+                {
+                    Problem = "";
+                    Debug.Log($"[Kimodo] A bridge server is already running at {serverUrl} — using that one " +
+                              "instead of starting another.");
+                    onReady?.Invoke(true, "A server was already running here; connected to it.");
+                    return;
+                }
+                StartProcess(serverUrl, preloadModel, onReady);
+            });
+        }
+
+        private static void StartProcess(string serverUrl, string preloadModel, Action<bool, string> onReady)
+        {
             string python = PythonPath;
             if (string.IsNullOrEmpty(python) || !File.Exists(python))
             {
@@ -361,8 +382,9 @@ namespace AminHP.KimodoBridge.Editor
             else if (line.IndexOf("address already in use", StringComparison.OrdinalIgnoreCase) >= 0 ||
                      line.IndexOf("only one usage of each socket address", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                Problem = "That port is already taken — a bridge server is probably running already. " +
-                          "Press Connect instead, or stop the other one.";
+                Problem = "That port is already taken — a bridge server is already running on it (another " +
+                          "Unity project, or a terminal). Press Connect to use it, or stop it where it was " +
+                          "started.";
                 Debug.LogWarning("[Kimodo] " + Problem);
             }
             else if (line.IndexOf("Traceback (most recent call last)", StringComparison.Ordinal) >= 0)

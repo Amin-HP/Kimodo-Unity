@@ -57,16 +57,26 @@ namespace AminHP.KimodoBridge.Editor
 
             bool running = KimodoServerLauncher.IsRunning;
             bool starting = KimodoServerLauncher.Starting;
+            // We only track servers THIS project started. One that is online without a PID of ours was
+            // started somewhere else — another Unity project, or a terminal — and saying "not running"
+            // about a server that is plainly answering is how you end up pressing Start and colliding
+            // with its port.
+            bool external = !running && !starting && b.Connection == KimodoBridge.ConnectionState.Online;
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                Dot(starting ? Amber : running ? Green : Grey,
+                Dot(starting ? Amber : running || external ? Green : Grey,
                     starting ? "Server starting…"
                     : running ? $"Server running (PID {KimodoServerLauncher.RunningPid})"
+                    : external ? "Server running (started outside this project)"
                               : "Server not running");
                 GUILayout.FlexibleSpace();
 
-                if (running)
+                if (external)
+                {
+                    // Nothing to offer: we cannot stop what we did not start, and it needs no starting.
+                }
+                else if (running)
                 {
                     if (GUILayout.Button("Stop", GUILayout.Width(64)))
                     {
@@ -82,7 +92,11 @@ namespace AminHP.KimodoBridge.Editor
                             StartServer(b);
             }
 
-            if (starting)
+            if (external)
+                EditorGUILayout.LabelField("Using a server that was already running — stop it where it was " +
+                    "started. Connect and the model may already be loaded, so it answers at once.",
+                    EditorStyles.wordWrappedMiniLabel);
+            else if (starting)
                 EditorGUILayout.LabelField("The first start loads the model, which takes a while.",
                     EditorStyles.wordWrappedMiniLabel);
             else if (KimodoServerLauncher.Detached)

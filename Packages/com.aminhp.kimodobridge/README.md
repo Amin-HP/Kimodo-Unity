@@ -47,7 +47,7 @@ The server does **not** have to be on the machine running Unity — see
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.5`.
+Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.6`.
 
 Only the package is fetched; the Unity project in that repository is just where it is developed.
 
@@ -74,10 +74,17 @@ environments near the project, and remembered per machine (not saved in the scen
 That is the only setting. The server itself ships inside this package, and Unity runs the interpreter
 directly, so the same button works on every platform. It connects by itself once the server answers.
 
-If it cannot start, it says which of the usual causes it hit — Kimodo missing from that environment, a
-wrong interpreter, the port already in use — and the server's own output is under **Server output**.
-The server keeps running across script recompiles (it is re-found by its process id), so **Stop** is
-how you end it; stopping also drops the connection so nothing shows green against a server that is gone.
+If it cannot start, it says which of the usual causes it hit — Kimodo missing from that environment or a
+wrong interpreter — and the server's own output is under **Server output**. The server keeps running
+across script recompiles (it is re-found by its process id), so **Stop** is how you end it; stopping also
+drops the connection so nothing shows green against a server that is gone.
+
+**One server serves everything.** It is a normal HTTP service on port 8765, not something owned by a
+project, so a server started by another Unity project or in a terminal is used as-is: **Start** notices
+one is already answering and connects to it rather than launching a second on the same port, and the
+status reads *Server running (started outside this project)* — with no Stop, since it is not this
+project's to stop. Connect can then come back instantly, model and all, because that server has been up
+for a while and already has the model loaded. That is working correctly, not a cached-looking lie.
 
 Two options worth knowing, both in **Setup**:
 
@@ -253,7 +260,8 @@ client.Generate(
 | Symptom | Likely cause and fix |
 |---|---|
 | **Start fails: "does not have Kimodo installed"** | The Python you picked is not the environment Kimodo lives in. Point **Setup ▸ Python** at that environment's interpreter. |
-| **Start fails: "port is already taken"** | A server is already running — press **Connect** instead, or stop the other one. |
+| **Connect goes green instantly, model and all** | A server was already running (another Unity project, or a terminal) with the model loaded. Nothing is wrong — that is the one you are using. |
+| **Start says the port is already taken** | Same cause, older behaviour. Start now adopts a server that is already answering; if you still see this, something else owns port 8765 — press **Connect**, or stop that process where it was started. |
 | **Generate fails with HTTP 500** | The message names the failing stage and the request shape; the full traceback is in **Server output** (or the terminal). |
 | **Generate fails: connection refused** | The server is not running, or **Server URL** points somewhere else. For a remote server, check it was started with `--host 0.0.0.0` and that the firewall allows the port. |
 | **Everything is green but nothing works** | The connection is a health check, not a live socket. Press **Disconnect** then **Connect** to re-check. |
