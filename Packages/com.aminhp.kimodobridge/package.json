@@ -1,6 +1,6 @@
 {
   "name": "com.aminhp.kimodobridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "displayName": "Kimodo Bridge",
   "description": "Real-time, interactive bridge between the Kimodo motion-generation model and Unity. Connect to a local bridge server, generate motion from text prompts, and retarget it onto Unity Humanoid characters (live preview, waypoints/constraints, bake to AnimationClip). Sequence multi-prompt shots in the Kimodo Timeline window, freezing the segments you want to keep. Independent wrapper — not affiliated with or endorsed by NVIDIA.",
   "unity": "6000.0",

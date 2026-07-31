@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-// Starts and stops the Python bridge server from inside Unity, so you do not have to keep a
-// PowerShell window around: press Start Server on the KimodoBridge and it runs run_bridge.ps1,
-// watches its output, and says in the Console whether it actually came up.
+// Starts and stops the Python bridge server from inside Unity, so you do not have to keep a terminal
+// around: press Start server on the KimodoBridge and it runs, watches its output, and says in the
+// Console whether it actually came up.
+//
+// It launches the interpreter DIRECTLY — `python -m kimodo_bridge --host … --port …` — rather than a
+// shell script. That is what makes this portable: the shell script only ever existed to pick the venv's
+// interpreter and set one environment variable, both of which are one line of C# each. No PowerShell
+// means no execution-policy failures, no process tree to chase when stopping, and the same code path on
+// Windows, macOS and Linux — only the interpreter's own location inside a venv differs.
+//
+// The server module itself ships in the package under `Server~` (Unity ignores folders ending in `~`),
+// so the only thing to configure is which Python to use.
 //
 // Three things this has to get right:
 //
@@ -9,9 +18,9 @@
 //    not allowed, so lines are queued and drained on EditorApplication.update. Only failures and a few
 //    milestones are logged (a model load prints a lot); the rest goes to a rolling buffer the Bridge
 //    inspector can show, so nothing is hidden but the Console stays readable.
-//  * FAILURES. "It did not start" is useless on its own. The common causes — the venv missing Kimodo,
-//    PowerShell's execution policy, a wrong path, the port already taken — are recognised in the output
-//    and reported as what to do about them.
+//  * FAILURES. "It did not start" is useless on its own. The common causes — Kimodo missing from the
+//    environment, a wrong interpreter, the port already taken — are recognised in the output and
+//    reported as what to do about them.
 //  * SURVIVING RELOADS. A script compile wipes every static field, including the Process handle, which
 //    would leave an orphan server nobody can stop. The PID is kept in EditorPrefs (not SessionState — an
 //    orphan has to be re-findable after a full restart too) and re-attached on load. Re-attached means
@@ -30,7 +39,9 @@ namespace AminHP.KimodoBridge.Editor
     [InitializeOnLoad]
     public static class KimodoServerLauncher
     {
-        private const string ScriptPref = "Kimodo.ServerScript";
+        private const string PythonPref = "Kimodo.PythonPath";
+        private const string ServerDirPref = "Kimodo.ServerDir";
+        private const string CpuEncoderPref = "Kimodo.TextEncoderCpu";
         private const string PidPref = "Kimodo.ServerPid";
         private const int MaxLogLines = 400;
 
@@ -38,7 +49,8 @@ namespace AminHP.KimodoBridge.Editor
         private static readonly Queue<string> _pending = new Queue<string>();
         private static readonly List<string> _log = new List<string>();
         private static bool _pumping;
-        private static double _waitUntil;
+        private static double _waitUntil, _nextPoll;
+        private static bool _probe;
         private static Action<bool, string> _onReady;
 
         /// <summary>Rolling tail of the server's own output (newest last).</summary>
@@ -50,37 +62,92 @@ namespace AminHP.KimodoBridge.Editor
         /// <summary>True while we are waiting for /health to answer after a start.</summary>
         public static bool Starting { get; private set; }
 
+        /// <summary>Where PollHealth looks; set from the Bridge's URL when starting.</summary>
+        public static string ProbeUrl { get; set; } = "http://127.0.0.1:8765";
+
         static KimodoServerLauncher()
         {
-            // Re-attach to a server this project started before the reload/restart.
             int pid = EditorPrefs.GetInt(PidKey, 0);
-            if (pid != 0 && !IsAlive(pid)) EditorPrefs.DeleteKey(PidKey);
+            if (pid != 0 && !IsAlive(pid)) Forget();   // it died while we were reloading
         }
 
         // Per-project, so two checkouts do not fight over one PID.
         private static string PidKey => PidPref + "." + Application.dataPath.GetHashCode();
 
-        /// <summary>Full path to run_bridge.ps1. Remembered per machine (it is not project data).</summary>
-        public static string ScriptPath
+        // ---- settings ---------------------------------------------------------------------------
+
+        /// <summary>The Python interpreter to run the server with — a virtual environment that has
+        /// Kimodo installed. Remembered per machine: it is not project data.</summary>
+        public static string PythonPath
         {
-            get => EditorPrefs.GetString(ScriptPref, GuessScriptPath());
-            set { EditorPrefs.SetString(ScriptPref, value ?? ""); Problem = ""; }
+            get
+            {
+                string p = EditorPrefs.GetString(PythonPref, "");
+                return string.IsNullOrEmpty(p) ? GuessPython() : p;
+            }
+            set { EditorPrefs.SetString(PythonPref, value ?? ""); Problem = ""; }
         }
 
-        /// <summary>A best guess at run_bridge.ps1: the copy bundled with this repo, then the usual
-        /// place the live Kimodo checkout sits.</summary>
-        public static string GuessScriptPath()
+        /// <summary>Folder containing the `kimodo_bridge` package. Defaults to the copy bundled with
+        /// this package, so there is normally nothing to set.</summary>
+        public static string ServerDir
+        {
+            get
+            {
+                string d = EditorPrefs.GetString(ServerDirPref, "");
+                return string.IsNullOrEmpty(d) ? BundledServerDir() : d;
+            }
+            set { EditorPrefs.SetString(ServerDirPref, value ?? ""); Problem = ""; }
+        }
+
+        /// <summary>Keep the ~8B text encoder on the CPU (what makes it fit in 8 GB of VRAM).</summary>
+        public static bool TextEncoderOnCpu
+        {
+            get => EditorPrefs.GetBool(CpuEncoderPref, true);
+            set => EditorPrefs.SetBool(CpuEncoderPref, value);
+        }
+
+        public static bool UsingBundledServer =>
+            string.IsNullOrEmpty(EditorPrefs.GetString(ServerDirPref, ""));
+
+        public static bool PythonIsSet => File.Exists(PythonPath);
+
+        /// <summary>The `Server~` folder inside this package (`~` keeps Unity from importing it).
+        /// Resolved through the package manager so it works whether the package sits in Packages/ or
+        /// has been installed from git into the read-only cache.</summary>
+        public static string BundledServerDir()
+        {
+            var info = UnityEditor.PackageManager.PackageInfo.FindForAssembly(
+                typeof(KimodoServerLauncher).Assembly);
+            string root = info != null ? info.resolvedPath
+                                       : Path.GetFullPath("Packages/com.aminhp.kimodobridge");
+            return Path.Combine(root, "Server~");
+        }
+
+        /// <summary>Look for a virtual environment near the project, the way one is usually laid out.
+        /// The interpreter lives in `Scripts` on Windows and `bin` everywhere else.</summary>
+        public static string GuessPython()
         {
             string projectRoot = Path.GetDirectoryName(Application.dataPath) ?? ".";
-            foreach (var candidate in new[]
-                     {
-                         Path.Combine(projectRoot, "Server", "run_bridge.ps1"),
-                         Path.Combine(Path.GetDirectoryName(projectRoot) ?? ".", "kimodo", "run_bridge.ps1"),
-                     })
-                if (File.Exists(candidate)) return candidate;
-            return "";
+            string up1 = Path.GetDirectoryName(projectRoot) ?? projectRoot;
+            string up2 = Path.GetDirectoryName(up1) ?? up1;
+
+            foreach (var root in new[] { projectRoot, up1, up2 })
+                foreach (var venv in new[] { "venv", ".venv", "env" })
+                    foreach (var exe in InterpreterNames)
+                    {
+                        string candidate = Path.Combine(root, venv, exe);
+                        if (File.Exists(candidate)) return candidate;
+                    }
+            return "";   // nothing found: the user picks one
         }
 
+        private static string[] InterpreterNames =>
+            Application.platform == RuntimePlatform.WindowsEditor
+                ? new[] { Path.Combine("Scripts", "python.exe") }
+                : new[] { Path.Combine("bin", "python3"), Path.Combine("bin", "python") };
+
+        // ---- state ------------------------------------------------------------------------------
         public static int RunningPid => EditorPrefs.GetInt(PidKey, 0);
 
         public static bool IsRunning
@@ -106,28 +173,44 @@ namespace AminHP.KimodoBridge.Editor
         {
             if (IsRunning) { onReady?.Invoke(true, "The server is already running."); return; }
 
-            string script = ScriptPath;
-            if (string.IsNullOrEmpty(script) || !File.Exists(script))
+            string python = PythonPath;
+            if (string.IsNullOrEmpty(python) || !File.Exists(python))
             {
-                Fail($"Could not find run_bridge.ps1. Set the path to it on the KimodoBridge " +
-                     $"(looked for '{script}').", onReady);
+                Fail("Set Python to the interpreter of an environment that has Kimodo installed " +
+                     "(venv/Scripts/python.exe on Windows, venv/bin/python elsewhere).", onReady);
                 return;
             }
 
-            int port = PortOf(serverUrl);
+            string serverDir = ServerDir;
+            if (!Directory.Exists(Path.Combine(serverDir, "kimodo_bridge")))
+            {
+                Fail($"No 'kimodo_bridge' folder in '{serverDir}'.", onReady);
+                return;
+            }
+
+            var uri = ParseUrl(serverUrl);
             var psi = new ProcessStartInfo
             {
-                FileName = "powershell.exe",
-                // -ExecutionPolicy Bypass: the script is local and the default policy blocks it on most
-                // machines, which otherwise fails with a message that looks nothing like the real cause.
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\" -Port {port}" +
-                            (string.IsNullOrWhiteSpace(preloadModel) ? "" : $" -Preload {preloadModel}"),
-                WorkingDirectory = Path.GetDirectoryName(script) ?? ".",
+                FileName = python,
+                WorkingDirectory = serverDir,     // `-m` puts the working directory on sys.path
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
+            psi.ArgumentList.Add("-u");           // unbuffered: otherwise output arrives in lumps
+            psi.ArgumentList.Add("-m");
+            psi.ArgumentList.Add("kimodo_bridge");
+            psi.ArgumentList.Add("--host"); psi.ArgumentList.Add(uri.host);
+            psi.ArgumentList.Add("--port"); psi.ArgumentList.Add(uri.port.ToString());
+            if (!string.IsNullOrWhiteSpace(preloadModel))
+            {
+                psi.ArgumentList.Add("--preload");
+                psi.ArgumentList.Add(preloadModel);
+            }
+            // The rest of the environment is inherited (HF_HOME and friends keep working).
+            psi.Environment["PYTHONPATH"] = serverDir;
+            if (TextEncoderOnCpu) psi.Environment["TEXT_ENCODER_DEVICE"] = "cpu";
 
             _log.Clear();
             Problem = "";
@@ -144,11 +227,11 @@ namespace AminHP.KimodoBridge.Editor
             catch (Exception e)
             {
                 _proc = null;
-                Fail("Could not start PowerShell: " + e.Message, onReady);
+                Fail($"Could not run '{python}': {e.Message}", onReady);
                 return;
             }
 
-            Debug.Log($"[Kimodo] Starting the bridge server (PID {_proc.Id}) — {script}");
+            Debug.Log($"[Kimodo] Starting the bridge server (PID {_proc.Id}) — {python} -m kimodo_bridge");
             Starting = true;
             _onReady = onReady;
             // Loading the ~8B text encoder is slow, and -Preload makes the first start slower still.
@@ -158,21 +241,22 @@ namespace AminHP.KimodoBridge.Editor
             EditorApplication.update += PollHealth;
         }
 
-        /// <summary>Stop the server we started (the whole tree: PowerShell plus the python it spawned).</summary>
+        /// <summary>Stop the server we started.</summary>
         public static void Stop()
         {
             int pid = RunningPid;
             if (pid == 0) return;
             try
             {
-                // taskkill /T, not Process.Kill: killing PowerShell alone would leave python holding the
-                // port, and Process.Kill(entireProcessTree) is not available on Unity's runtime.
-                using (var kill = Process.Start(new ProcessStartInfo("taskkill", $"/PID {pid} /T /F")
-                { UseShellExecute = false, CreateNoWindow = true }))
-                    kill?.WaitForExit(5000);
+                // One process, no shell wrapper, so a plain Kill is enough — and it is the same call on
+                // every platform. (The PowerShell version needed taskkill /T to reach its python child.)
+                var p = _proc != null && !_proc.HasExited ? _proc : Process.GetProcessById(pid);
+                p.Kill();
+                p.WaitForExit(5000);
             }
             catch (Exception e) { Debug.LogWarning("[Kimodo] Could not stop the server: " + e.Message); }
 
+            _proc = null;
             Forget();
             Starting = false;
             EditorApplication.update -= PollHealth;
@@ -208,7 +292,6 @@ namespace AminHP.KimodoBridge.Editor
                     Classify(line);
                 }
 
-            // The process object is gone after a domain reload; the PID check keeps working.
             if (_proc != null && _proc.HasExited)
             {
                 int code = SafeExitCode(_proc);
@@ -235,25 +318,17 @@ namespace AminHP.KimodoBridge.Editor
             if (line.IndexOf("No module named", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 line.IndexOf("ModuleNotFoundError", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                string missing = line.IndexOf("kimodo", StringComparison.OrdinalIgnoreCase) >= 0
-                    ? "Kimodo itself is not installed in that virtual environment — install it there " +
-                      "(pip install -e .) and try again."
-                    : "A Python package the server needs is missing from that virtual environment.";
-                Problem = missing + "  (" + line.Trim() + ")";
-                Debug.LogError("[Kimodo] " + Problem);
-            }
-            else if (line.IndexOf("cannot be loaded because running scripts is disabled", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                Problem = "PowerShell blocked the script (execution policy). It is launched with " +
-                          "-ExecutionPolicy Bypass, so a machine-wide policy is overriding it.";
-                Debug.LogError("[Kimodo] " + Problem);
-            }
-            else if (line.IndexOf("is not recognized", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                     line.IndexOf("Activate.ps1", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                     line.IndexOf("not exist", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                Problem = "The script could not find its Python virtual environment — check that the venv " +
-                          "sits next to the Kimodo folder, as run_bridge.ps1 expects.";
+                // Which module is missing says which of three different things went wrong.
+                bool bridge = line.IndexOf("kimodo_bridge", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool kimodo = !bridge && line.IndexOf("kimodo", StringComparison.OrdinalIgnoreCase) >= 0;
+                Problem = (bridge
+                    ? "Python could not find the bridge server itself — the Server folder under Setup is " +
+                      "not a folder containing 'kimodo_bridge'. Clear it to use the bundled copy."
+                    : kimodo
+                    ? "That Python environment does not have Kimodo installed — install it there " +
+                      "(pip install -e . in the Kimodo repo) and start again."
+                    : "A Python package the server needs is missing from that environment.") +
+                    "  (" + line.Trim() + ")";
                 Debug.LogError("[Kimodo] " + Problem);
             }
             else if (line.IndexOf("address already in use", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -290,7 +365,7 @@ namespace AminHP.KimodoBridge.Editor
 
             if (_probe) return;
             _probe = true;
-            new KimodoClient(_probeUrl).GetHealth((ok, _, __) =>
+            new KimodoClient(ProbeUrl).GetHealth((ok, _, __) =>
             {
                 _probe = false;
                 if (!ok || !Starting) return;
@@ -301,13 +376,6 @@ namespace AminHP.KimodoBridge.Editor
                 _onReady = null;
             });
         }
-
-        private static double _nextPoll;
-        private static bool _probe;
-        private static string _probeUrl = "http://127.0.0.1:8765";
-
-        /// <summary>Where PollHealth looks; set from the Bridge's URL when starting.</summary>
-        public static string ProbeUrl { get => _probeUrl; set => _probeUrl = value; }
 
         private static void Fail(string why, Action<bool, string> onReady)
         {
@@ -329,10 +397,11 @@ namespace AminHP.KimodoBridge.Editor
             try { return p.ExitCode; } catch { return -1; }
         }
 
-        private static int PortOf(string url)
+        private static (string host, int port) ParseUrl(string url)
         {
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Port > 0) return uri.Port;
-            return 8765;
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Port > 0)
+                return (uri.Host, uri.Port);
+            return ("127.0.0.1", 8765);
         }
     }
 }

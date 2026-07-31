@@ -599,16 +599,25 @@ domain reload — script compile, entering play mode, restart — threw away a m
 
 ## 7j. Starting the server from Unity + installing as a UPM package (2026-07-31)
 
-- **`Editor/KimodoServerLauncher.cs`** runs `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
-  run_bridge.ps1 -Port <from the Bridge URL> [-Preload <model>]`, so the server can be started from the
-  KimodoBridge inspector (*Server process* foldout) instead of a terminal. Three things it has to get
-  right, and did not get for free:
+- **`Editor/KimodoServerLauncher.cs`** runs `<python> -u -m kimodo_bridge --host … --port …
+  [--preload …]` so the server can be started from the KimodoBridge inspector instead of a terminal.
+  **It launches the interpreter directly, not a shell script** — the script only ever existed to pick
+  the venv's interpreter and set `TEXT_ENCODER_DEVICE`, one line of C# each. That is what makes it
+  portable (Windows/macOS/Linux differ only in `Scripts/python.exe` vs `bin/python`), removes the
+  execution-policy failure mode, and means Stop is a plain `Process.Kill` instead of `taskkill /T`
+  chasing a python child. **The server module ships in the package** under `Server~` (Unity ignores
+  `~` folders), resolved via `PackageManager.PackageInfo.FindForAssembly(...).resolvedPath` so it works
+  from `Packages/` and from the read-only git cache alike; `PYTHONPATH` + the working directory point at
+  it, so `-m kimodo_bridge` resolves without the user locating anything. The only setting is the Python
+  interpreter (an EditorPref, machine-specific — guessed from venv/.venv/env near the project).
+  Three things it has to get right, and did not get for free:
   - **Output arrives on background threads**, where the Unity API is off limits — lines are queued and
     drained on `EditorApplication.update`. Only failures + milestones are logged (a model load prints a
     lot); everything goes to a rolling 400-line buffer the inspector shows.
-  - **Failures are classified**, not just reported: `ModuleNotFoundError`/`No module named` → Kimodo is
-    not installed in that venv; "running scripts is disabled" → execution policy; missing `Activate.ps1`
-    → the venv is not where run_bridge.ps1 expects; "address already in use" → a server is already up,
+  - **Failures are classified**, not just reported — and *which* module is missing says which of three
+    different things went wrong: `No module named 'kimodo'` → Kimodo is not installed in that
+    environment; `'kimodo_bridge'` → the Server folder override is wrong (clear it for the bundled
+    copy); anything else → a missing dependency. Plus "address already in use" → a server is already up,
     press Connect. Plain "it exited" would send the user hunting.
   - **A domain reload wipes the `Process` handle**, which would orphan the server. The PID is kept in
     **EditorPrefs** (not SessionState — an orphan must be findable after a full restart too), keyed by
@@ -617,7 +626,11 @@ domain reload — script compile, entering play mode, restart — threw away a m
     the port, and `Process.Kill(entireProcessTree)` is not on Unity's runtime.
   - Being alive ≠ serving, so readiness is `GET /health` polled once a second for up to 5 minutes (a
     preload is slow); on success it Connects the bridge by itself.
-  - The script path is an **EditorPref**, not a scene field: it points at this machine's Kimodo checkout.
+- **The Bridge inspector was reorganised** around the three states in the order you meet them — server
+  running / connected / model loaded — each one status line with the button that changes it. Everything
+  set once (URL, Python, server folder, CPU text encoder) moved behind a **Setup** foldout that opens
+  itself while Python is unset or something failed; the server output has its own foldout so a model
+  load cannot bury the controls.
 - **UPM install needs no restructuring.** The repo is a Unity project with the package inside it, and
   Package Manager takes a subfolder directly:
   `https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge` (append `#v0.2.0`
@@ -644,8 +657,8 @@ domain reload — script compile, entering play mode, restart — threw away a m
   can slide (there is a >25 cm warning). `num_samples` is forced to 1 while anything is frozen, and foot
   contacts are not reported on that path. Un-frozen-to-frozen junctions are a hard cut in the pose — the
   boundary constraints get it close, but no crossfade is applied.
-- **The server launcher (§7j) is Windows-only** — it shells out to `powershell.exe` and `taskkill`. On
-  macOS/Linux the buttons would need a `sh` path; starting the server in a terminal still works there.
+- **The server launcher (§7j) is untested on macOS/Linux.** It no longer uses any shell, so the code
+  path is the same everywhere, but only the Windows path has actually been run.
 - **Motion cache** (§7i) has no size limit and is never swept: one file per generator in
   `Library/KimodoMotionCache/`, replaced on each Generate, orphaned if a character is deleted. Deleting
   the folder is always safe.

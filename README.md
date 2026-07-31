@@ -34,7 +34,7 @@ with it. In **Window ▸ Package Manager ▸ + ▸ Install package from git URL*
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.0`. You still need the Python
+Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.1`. You still need the Python
 bridge server (below) — the package talks to it over HTTP.
 
 ## Quick start
@@ -43,9 +43,10 @@ bridge server (below) — the package talks to it over HTTP.
    ```powershell
    .\run_bridge.ps1              # serves http://127.0.0.1:8765
    ```
-   Or let Unity do it: the **KimodoBridge** manager has a **Start server** button — point it at your
-   `run_bridge.ps1` once and it launches the server, reports what went wrong if it cannot, and connects
-   by itself when it is up.
+   Or let Unity do it: the **KimodoBridge** manager has a **Start** button. The server ships inside the
+   package, so the only setting is which **Python** to use — an environment with Kimodo installed. It
+   runs the interpreter directly, so it works on Windows, macOS and Linux alike, reports what went wrong
+   if it cannot start, and connects by itself when it is up.
 2. **Unity** — open this project (Unity 6, URP), or install the package into your own. Then:
    - `GameObject ▸ Kimodo ▸ Bridge Manager` → **Connect**.
    - Select a **Humanoid** character → `GameObject ▸ Kimodo ▸ Set Up Selected Character`.
@@ -81,7 +82,7 @@ Full usage, constraints, and the runtime API are in the
 | Path | What |
 |------|------|
 | `Packages/com.aminhp.kimodobridge/` | The Unity package (runtime + editor). The deliverable — this is what the git URL above installs. |
-| `Server/` | The Python FastAPI bridge server (reference; needs NVIDIA Kimodo installed). |
+| `Server/` | The Python bridge server, for reading and for running by hand. The package ships its own copy under `Server~`, which is what Unity's Start button runs. |
 | `Assets/` | A minimal URP sample project. The test character is not committed. |
 
 ## Requirements

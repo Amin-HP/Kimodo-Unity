@@ -16,7 +16,7 @@ Generate human motion from a text prompt, preview it live on any **Humanoid** ch
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Add `#v0.2.0` (or any tag) to pin a version. The package is self-contained; the Unity project in that
+Add `#v0.2.1` (or any tag) to pin a version. The package is self-contained; the Unity project in that
 repository is only where it is developed.
 
 ## 1. Start the bridge server
@@ -33,12 +33,17 @@ Add `-Preload soma` to load the model at startup (otherwise it loads on the firs
 (`TEXT_ENCODER_DEVICE=cpu`), so a generation takes tens of seconds. **Restart the server after any
 server change.**
 
-**Or start it from Unity.** On the **KimodoBridge** manager, open *Server process*, point it at your
-`run_bridge.ps1` (remembered per machine, not stored in the scene) and press **Start server**. It runs
-the script in the background, connects by itself once the server answers, and if it cannot start it says
-why — Kimodo missing from the virtual environment, a blocked PowerShell policy, a wrong path, or the port
-already in use. The server's own output is under *Server output*. It keeps running across recompiles
-(and is re-found by its process id), so **Stop server** is how you end it.
+**Or start it from Unity — one setting.** The server ships inside this package, so the KimodoBridge
+manager only needs to know which **Python** to use: an environment that has Kimodo installed
+(`venv/Scripts/python.exe` on Windows, `venv/bin/python` on macOS and Linux). It is guessed from
+virtual environments near the project, and remembered per machine rather than in the scene. Press
+**Start** and it connects by itself once the server answers.
+
+It runs the interpreter directly (`python -m kimodo_bridge`), not a shell script, so the same button
+works on every platform. If it cannot start, it says why rather than just failing: Kimodo missing from
+that environment, the port already in use, a wrong interpreter. The server's own output is under
+*Server output*. It keeps running across recompiles (it is re-found by its process id), so **Stop** is
+how you end it.
 
 ## 2. Set up the character (component workflow)
 
