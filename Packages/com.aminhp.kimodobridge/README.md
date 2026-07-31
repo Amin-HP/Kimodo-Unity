@@ -16,7 +16,7 @@ Generate human motion from a text prompt, preview it live on any **Humanoid** ch
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Add `#v0.2.3` (or any tag) to pin a version. The package is self-contained; the Unity project in that
+Add `#v0.2.4` (or any tag) to pin a version. The package is self-contained; the Unity project in that
 repository is only where it is developed.
 
 ## 1. Start the bridge server
@@ -44,6 +44,21 @@ works on every platform. If it cannot start, it says why rather than just failin
 that environment, the port already in use, a wrong interpreter. The server's own output is under
 *Server output*. It keeps running across recompiles (it is re-found by its process id), so **Stop** is
 how you end it.
+
+### Running the server on another machine
+
+It is plain HTTP, so the server does not have to be on the machine running Unity — useful when the GPU
+lives elsewhere, or when a standalone device should drive it.
+
+- **On the machine with the GPU:** run the server so it listens beyond localhost —
+  `python -m kimodo_bridge --host 0.0.0.0`, or, if you start it from a Unity there, tick **Reachable
+  from other devices** in Setup. Its firewall has to allow the port (8765 by default).
+- **On the other machine:** put that machine's address in **Server URL**
+  (e.g. `http://192.168.1.50:8765`) and press **Connect**. The Start/Stop buttons disappear when the URL
+  is not local — there is nothing here to start — and everything else behaves exactly the same.
+
+The API has **no authentication**: anything that can reach the port can drive the model. Keep it to a
+network you trust.
 
 ## 2. Set up the character (component workflow)
 

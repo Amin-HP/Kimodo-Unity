@@ -41,6 +41,20 @@ namespace AminHP.KimodoBridge.Editor
         // ---- 1. the server process ---------------------------------------------------------------
         private void DrawServerRow(KimodoBridge b)
         {
+            // A URL naming another machine means the server lives there: there is nothing here to
+            // start or stop, and offering the buttons would only mislead.
+            if (!KimodoServerLauncher.IsLocalUrl(b.serverUrl))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    Dot(Grey, "Server on another machine");
+                    GUILayout.FlexibleSpace();
+                }
+                EditorGUILayout.LabelField("Start it over there, then Connect. It has to be run with " +
+                    "--host 0.0.0.0 to accept connections from this one.", EditorStyles.wordWrappedMiniLabel);
+                return;
+            }
+
             bool running = KimodoServerLauncher.IsRunning;
             bool starting = KimodoServerLauncher.Starting;
 
@@ -54,7 +68,13 @@ namespace AminHP.KimodoBridge.Editor
 
                 if (running)
                 {
-                    if (GUILayout.Button("Stop", GUILayout.Width(64))) { KimodoServerLauncher.Stop(); Repaint(); }
+                    if (GUILayout.Button("Stop", GUILayout.Width(64)))
+                    {
+                        // Stopping also drops the connection (see KimodoBridgeAutoConnect.OnServerStopped),
+                        // so the rows below go grey with it instead of staying green against nothing.
+                        KimodoServerLauncher.Stop();
+                        Repaint();
+                    }
                 }
                 else
                     using (new EditorGUI.DisabledScope(starting))
@@ -193,6 +213,17 @@ namespace AminHP.KimodoBridge.Editor
                         MessageType.Info);
 
                 EditorGUI.BeginChangeCheck();
+                bool remote = EditorGUILayout.Toggle(new GUIContent("Reachable from other devices",
+                    "Bind the server to 0.0.0.0 so another machine can use it — point that machine's " +
+                    "Server URL at this one's IP. The API has no authentication, so only do this on a " +
+                    "network you trust."), KimodoServerLauncher.AllowRemoteClients);
+                if (EditorGUI.EndChangeCheck()) KimodoServerLauncher.AllowRemoteClients = remote;
+                if (KimodoServerLauncher.AllowRemoteClients)
+                    EditorGUILayout.HelpBox(
+                        "The server will accept connections from anything that can reach this machine. " +
+                        "There is no authentication — keep it to a network you trust.", MessageType.Warning);
+
+                EditorGUI.BeginChangeCheck();
                 bool cpu = EditorGUILayout.Toggle(new GUIContent("Text encoder on CPU",
                     "Keeps the ~8B text encoder off the GPU so the diffusion model fits in 8 GB of VRAM. " +
                     "Turn it off on a bigger card for faster prompts."), KimodoServerLauncher.TextEncoderOnCpu);
@@ -218,7 +249,9 @@ namespace AminHP.KimodoBridge.Editor
                     EditorGUILayout.LabelField("Using the server bundled with the package.", EditorStyles.miniLabel);
 
                 EditorGUILayout.LabelField(
-                    "The connection survives Play mode and recompiles (auto-reconnect); Disconnect stops that.",
+                    "The connection survives Play mode and recompiles (auto-reconnect); Disconnect stops that. " +
+                    "To use a server on another machine, put its address in Server URL — everything else works " +
+                    "the same, it is all plain HTTP.",
                     EditorStyles.wordWrappedMiniLabel);
             }
         }

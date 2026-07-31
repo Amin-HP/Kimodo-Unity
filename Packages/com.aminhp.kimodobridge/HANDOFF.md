@@ -637,6 +637,16 @@ domain reload — script compile, entering play mode, restart — threw away a m
   set once (URL, Python, server folder, CPU text encoder) moved behind a **Setup** foldout that opens
   itself while Python is unset or something failed; the server output has its own foldout so a model
   load cannot bury the controls.
+- **Stopping the server clears the connection UI.** "Connected" is not a live socket — it only means a
+  past `/health` answered — so nothing contradicted the green dots when the server went away.
+  `KimodoServerLauncher.Stopped` now fires on Stop and on an unexpected exit;
+  `KimodoBridgeAutoConnect.OnServerStopped` disconnects every bridge, clears `Wanted` (so auto-reconnect
+  does not chase a dead server) and repaints.
+- **The server may live on another machine** — it is all HTTP. `IsLocalUrl(url)` decides whether the
+  Start/Stop row makes sense at all; a non-local URL shows "Server on another machine" instead of
+  buttons that could not work. `AllowRemoteClients` (EditorPref, default **off**) binds `0.0.0.0` so
+  another device can reach a locally started server; it warns in the inspector, because the API has no
+  authentication.
 - **UPM install needs no restructuring.** The repo is a Unity project with the package inside it, and
   Package Manager takes a subfolder directly:
   `https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge` (append `#v0.2.0`

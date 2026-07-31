@@ -25,6 +25,23 @@ namespace AminHP.KimodoBridge.Editor
         {
             // InitializeOnLoad's static ctor re-runs after every domain reload; defer so the scene is ready.
             EditorApplication.delayCall += Reconnect;
+
+            // "Connected" is not a live socket — it only means a health check once succeeded — so when
+            // the server we started goes away, nothing would otherwise contradict the green dot.
+            KimodoServerLauncher.Stopped -= OnServerStopped;
+            KimodoServerLauncher.Stopped += OnServerStopped;
+        }
+
+        private static void OnServerStopped()
+        {
+            Wanted = false;   // do not silently reconnect to a server that is not there
+            foreach (var b in Object.FindObjectsByType<KimodoBridge>(FindObjectsSortMode.None))
+            {
+                b.Disconnect();
+                b.StatusMessage = "The server was stopped.";
+            }
+            SceneView.RepaintAll();
+            UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
         }
 
         private static void Reconnect()

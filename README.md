@@ -34,7 +34,7 @@ with it. In **Window ▸ Package Manager ▸ + ▸ Install package from git URL*
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.3`. You still need the Python
+Pin a release by adding a tag, e.g. `…com.aminhp.kimodobridge#v0.2.4`. You still need the Python
 bridge server (below) — the package talks to it over HTTP.
 
 ## Quick start
@@ -77,6 +77,8 @@ Full usage, constraints, and the runtime API are in the
   - The editing tools (drag a limb, aim it, rotate joints, move the pose) sit in a dockable **Scene-view
     overlay**, and the key you edit follows the playhead — or a click on its Timeline key.
 - **Auto root-motion scale** that absorbs per-character unit/scale differences.
+- **The server can live on another machine** — it is plain HTTP; point Server URL at the box with the
+  GPU (run it there with `--host 0.0.0.0`).
 - **Progress while generating** — the server's real position in its denoising loop, shown in the
   generator and the timeline.
 

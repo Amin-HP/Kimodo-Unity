@@ -39,9 +39,15 @@ namespace AminHP.KimodoBridge.Editor
     [InitializeOnLoad]
     public static class KimodoServerLauncher
     {
+        /// <summary>Raised when the server we started goes away — stopped here, or exited on its own.
+        /// The connection state is not observable (there is no socket: "connected" only means a past
+        /// /health answered), so without this the UI keeps showing green against a server that is gone.</summary>
+        public static event System.Action Stopped;
+
         private const string PythonPref = "Kimodo.PythonPath";
         private const string ServerDirPref = "Kimodo.ServerDir";
         private const string CpuEncoderPref = "Kimodo.TextEncoderCpu";
+        private const string RemotePref = "Kimodo.AllowRemote";
         private const string PidPref = "Kimodo.ServerPid";
         private const int MaxLogLines = 400;
 
@@ -105,6 +111,24 @@ namespace AminHP.KimodoBridge.Editor
         {
             get => EditorPrefs.GetBool(CpuEncoderPref, true);
             set => EditorPrefs.SetBool(CpuEncoderPref, value);
+        }
+
+        /// <summary>Bind to 0.0.0.0 instead of just this machine, so another device (a second PC, a
+        /// headset) can reach the server. Off by default: the API has no authentication, so opening it
+        /// to the network is a choice, not a default.</summary>
+        public static bool AllowRemoteClients
+        {
+            get => EditorPrefs.GetBool(RemotePref, false);
+            set => EditorPrefs.SetBool(RemotePref, value);
+        }
+
+        /// <summary>True when the URL points at this machine — the only case where Start makes sense.
+        /// A URL naming another host means the server lives there and is started there.</summary>
+        public static bool IsLocalUrl(string url)
+        {
+            if (!System.Uri.TryCreate(url, System.UriKind.Absolute, out var uri)) return true;
+            string h = uri.Host;
+            return h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "0.0.0.0";
         }
 
         public static bool UsingBundledServer =>
@@ -201,7 +225,8 @@ namespace AminHP.KimodoBridge.Editor
             psi.ArgumentList.Add("-u");           // unbuffered: otherwise output arrives in lumps
             psi.ArgumentList.Add("-m");
             psi.ArgumentList.Add("kimodo_bridge");
-            psi.ArgumentList.Add("--host"); psi.ArgumentList.Add(uri.host);
+            psi.ArgumentList.Add("--host");
+            psi.ArgumentList.Add(AllowRemoteClients ? "0.0.0.0" : uri.host);
             psi.ArgumentList.Add("--port"); psi.ArgumentList.Add(uri.port.ToString());
             if (!string.IsNullOrWhiteSpace(preloadModel))
             {
@@ -261,6 +286,7 @@ namespace AminHP.KimodoBridge.Editor
             Starting = false;
             EditorApplication.update -= PollHealth;
             Debug.Log("[Kimodo] Bridge server stopped.");
+            Stopped?.Invoke();
         }
 
         // -----------------------------------------------------------------------------------------
@@ -309,6 +335,7 @@ namespace AminHP.KimodoBridge.Editor
                     _onReady = null;
                 }
                 else Debug.Log($"[Kimodo] The bridge server exited (code {code}).");
+                Stopped?.Invoke();
             }
         }
 
