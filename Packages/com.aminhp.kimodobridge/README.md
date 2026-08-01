@@ -11,6 +11,9 @@ reached over plain HTTP.
 > Independent wrapper by AminHP — **not** affiliated with, sponsored by, or endorsed by NVIDIA.
 > Apache-2.0. See [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md).
 
+**▶ [Watch the demo](https://youtu.be/GlcN4yTN5CE)** — the whole workflow, from starting the server to
+baking a clip, in a couple of minutes.
+
 ---
 
 ## Contents

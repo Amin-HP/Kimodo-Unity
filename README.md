@@ -12,6 +12,15 @@ ordinary `AnimationClip` that needs none of this at runtime.
 
 ---
 
+## Demo
+
+Every feature below, in a couple of minutes — starting the server, a prompt, constraints, the timeline,
+freezing, and baking.
+
+[![Kimodo Bridge for Unity — text to motion, live in the editor](https://img.youtube.com/vi/GlcN4yTN5CE/maxresdefault.jpg)](https://youtu.be/GlcN4yTN5CE)
+
+---
+
 ## Install
 
 **Window ▸ Package Manager ▸ + ▸ Install package from git URL:**
