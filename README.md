@@ -74,3 +74,7 @@ the timeline, freezing, baking, the runtime API and troubleshooting.
 
 Apache-2.0 for this repository's own code. NVIDIA Kimodo is separate, under its own Apache-2.0 license,
 and is **not** redistributed here — install it yourself.
+
+## Support
+
+If this saved you some time, you can support the work here: **[Buy me a coffee](https://buymeacoffee.com/aminhp)**.

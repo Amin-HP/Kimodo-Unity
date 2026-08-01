@@ -301,3 +301,7 @@ on the CPU by default.
 ## License
 
 Apache-2.0. Kimodo is separate, under its own Apache-2.0 license, and is not redistributed here.
+
+## Support
+
+If this saved you some time, you can support the work here: **[Buy me a coffee](https://buymeacoffee.com/aminhp)**.
