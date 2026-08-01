@@ -20,7 +20,7 @@ ordinary `AnimationClip` that needs none of this at runtime.
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.7`. Only the package folder is
+Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.8`. Only the package folder is
 fetched — the Unity project in this repository is just where it is developed.
 
 You also need **Python 3.10 with [Kimodo](https://github.com/nv-tlabs/kimodo) installed** and a CUDA GPU
@@ -48,6 +48,8 @@ the timeline, freezing, baking, the runtime API and troubleshooting.
   - **Waypoints** — the ground path the pelvis follows, with per-point facing.
   - **End-Effectors** — hand / foot keyframes; drag a limb and it bends to reach.
   - **Full-Body poses** — pose the whole rig, or switch individual joints off.
+  - Each key is shown as a transparent **ghost of your own model**, faded down to the part of the body
+    the key is about, so you place a hand on an arm rather than on a bare skeleton.
 - **Timeline** — sequence a shot as ordered prompt segments on one frame axis carrying every constraint
   key, give a beat its own constraint strength, and **❄ freeze** the segments you are happy with so
   Generate skips them entirely and only regenerates the rest.

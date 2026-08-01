@@ -723,6 +723,46 @@ self-reporting instead of guessed at:
   preview, bake and frozen segments all work on one clip. `numSamples` stays as a `[HideInInspector]`
   field for code that wants a batch, and the request sends `Mathf.Max(1, numSamples)`.
 
+## 7n. The stretching arm — quaternions must stay UNIT (2026-08-01)
+
+§7m stopped the handle from *re-anchoring* to itself, but the user still saw the real bug behind it:
+drag a hand and the arm bends off in its own direction and **grows longer and longer**, the gizmo
+swelling as the runaway hand carries it away from the camera. Two independent defects, both in the
+solve, both now fixed and both verified numerically before the edit:
+
+1. **Nothing kept the rotations unit-length, and the error compounded.** `KimodoFK` places a joint with
+   `gpos[parent] + grot[parent] * offset`, and **Unity's `Quaternion * Vector3` scales the vector by
+   |q|²** — so a rotation that drifts off the unit sphere does not rotate the skeleton, it STRETCHES
+   it. The drift had nowhere to go but up: `Quaternion.Inverse` is a bare conjugate (correct only for a
+   unit quaternion), so `localMid = Inverse(gUpNew) * gMidNew` *multiplied* the ancestors' error
+   instead of cancelling it, and the effector's `Inverse(parentG) * keepEnd` did it again. Every
+   mouse-move event of a drag ran another solve off the previous result, so the exponent grew with the
+   square of the number of solves. Simulated in float32 with Unity's conjugate inverse: forearm stretch
+   ×1.0027 after 100 solves, ×1.31 after 1 000, ×764 after 5 000, `NaN` shortly after — i.e. fine for a
+   nudge, visibly wrong after a few seconds of dragging, exactly what was reported.
+   **Fix: `KimodoFK.Unit(q)` / `KimodoFK.Inv(q)`** (normalise; `Inv` normalises *then* conjugates) and
+   everything that composes or stores a rotation goes through them — FK on read and on every
+   composition, `KimodoIK`'s inputs and outputs, `KimodoEndEffectors.WriteQuat`, `SolveLimbTo`,
+   `SetJointGlobalRotation`. `NormalizePose()` renormalises a whole key in `EnsurePose` and before each
+   solve, so **poses already saved with drifted quaternions repair themselves on load** rather than
+   staying bent (it also keeps what `BuildConstraints` sends the server unit-length).
+   **RULE: never trust `Quaternion.Inverse` here, and never store a rotation without normalising it.**
+2. **The IK pole was perpendicular to the WRONG axis.** `bendDir` was flattened onto the plane of the
+   *current* upper→end axis, then used with the *new* target axis, where `h` and `r` are the legs of a
+   right triangle. A `bendDir` still leaning along the new axis makes `|pMidNew - pUp|` longer than the
+   upper bone, so the aim rotation is off and FK lands the hand **short of the target** — the limb
+   visibly bending its own way, and the next mouse-move solving from an already-wrong pose. Flattening
+   onto the NEW axis makes the solve exact in one step: |end − target| went from 0.066 → 0.014 → 0.003 →
+   … over six iterations (old) to **0.000 on the first** (new), bone lengths identical either way.
+
+Also: **the ghost mesh is ON by default for hand/foot keys** (`showGhostMesh = true`, matching
+`KimodoPoseConstraints`) — a hand on an actual arm is what makes a key readable; the skeleton alone is
+not. Because a plain field initialiser only reaches components created from *now on*,
+`KimodoEndEffectors` implements `ISerializationCallbackReceiver` with a `settingsVersion` field:
+`OnAfterDeserialize` migrates anything saved below the current version. **Bump
+`CurrentSettingsVersion` (and add a branch) whenever a default here changes** — that is the only way an
+already-authored scene picks it up.
+
 ## 8. Known issues / open work
 
 - **Effector HEIGHT is still soft** — a raised foot (e.g. onto a box) often doesn't fully lift: Kimodo is soft +

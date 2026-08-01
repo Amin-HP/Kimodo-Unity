@@ -22,7 +22,7 @@ namespace AminHP.KimodoBridge
 {
     [AddComponentMenu("Kimodo/Kimodo End-Effectors")]
     [RequireComponent(typeof(KimodoGenerator))]
-    public class KimodoEndEffectors : MonoBehaviour
+    public class KimodoEndEffectors : MonoBehaviour, ISerializationCallbackReceiver
     {
         /// <summary>Legacy single-limb selector, kept so pre-pose scenes and takes still deserialize.</summary>
         public enum Kind { LeftFoot, RightFoot, LeftHand, RightHand }
@@ -81,10 +81,17 @@ namespace AminHP.KimodoBridge
         [Tooltip("Show only the key at the preview frame (the demo's 'show only current constraint').")]
         public bool showOnlyCurrentFrame;
 
-        [Tooltip("Also show the character's mesh at each shown key's pose, as a transparent ghost.")]
-        public bool showGhostMesh;
+        [Tooltip("Also show the character's mesh at each shown key's pose, as a transparent ghost. " +
+                 "On by default — seeing the hand on an actual arm is what makes a key readable; " +
+                 "the skeleton alone is not.")]
+        public bool showGhostMesh = true;
 
         [Range(0f, 1f)] public float ghostOpacity = 0.2f;
+
+        // Bumped whenever a default above changes, so components ALREADY saved in a scene pick the new
+        // default up instead of keeping the old serialized value forever. See OnAfterDeserialize.
+        private const int CurrentSettingsVersion = 1;
+        [SerializeField, HideInInspector] private int settingsVersion;
 
         [Tooltip("When you drag a hand/foot, keep its orientation instead of letting it swing with the " +
                  "limb — e.g. a foot stays flat on the ground. Its rotation is part of the constraint.")]
@@ -92,6 +99,19 @@ namespace AminHP.KimodoBridge
 
         public KimodoGenerator ResolvedGenerator =>
             generator != null ? generator : (generator = GetComponent<KimodoGenerator>());
+
+        public void OnBeforeSerialize() { }
+
+        /// <summary>Carry a component saved before <see cref="CurrentSettingsVersion"/> up to the
+        /// current defaults. A plain field initialiser only reaches components created from now on —
+        /// one already in a scene deserializes whatever it was saved with, so the ghost stayed off for
+        /// everyone who had ever opened this component.</summary>
+        public void OnAfterDeserialize()
+        {
+            if (settingsVersion >= CurrentSettingsVersion) return;
+            if (settingsVersion < 1) showGhostMesh = true;   // ghost mesh went from opt-in to on
+            settingsVersion = CurrentSettingsVersion;
+        }
 
         // ---------------------------------------------------------------------------------------
         // Limb metadata. Names are SOMA bone names; the joints Kimodo actually constrains per limb
@@ -314,10 +334,12 @@ namespace AminHP.KimodoBridge
             var sk = g != null ? g.PoseSkeleton : null;
             if (t == null || sk == null) return false;
             int need = sk.jointCount * 4;
-            if (t.hasPose && t.localQuats != null && t.localQuats.Length == need) return true;
+            if (t.hasPose && t.localQuats != null && t.localQuats.Length == need)
+            { NormalizePose(t.localQuats); return true; }
 
             if (!AlignKeyToMotion(t)) SetIdlePose(t);
             if (!t.hasPose || t.localQuats == null || t.localQuats.Length != need) return false;
+            NormalizePose(t.localQuats);
 
             // Migrate a legacy world target: bend the limb onto the point the user had placed.
             if (t.world != Vector3.zero)
@@ -374,7 +396,9 @@ namespace AminHP.KimodoBridge
             var (upN, midN, endN) = IKChain(limb);
             int iUp = KimodoFK.BoneIndex(sk, upN), iMid = KimodoFK.BoneIndex(sk, midN), iEnd = KimodoFK.BoneIndex(sk, endN);
             if (iUp < 0 || iMid < 0 || iEnd < 0) return false;
+            if (!IsFinite(targetKimodo)) return false;
 
+            NormalizePose(t.localQuats);   // never solve off a drifted pose (see WriteQuat)
             KimodoFK.GlobalPose(sk, PoseClip(t), 0, out var gpos, out var grot);
             Quaternion keepEnd = grot[iEnd];
             int iParent = sk.bones[iUp].parent;
@@ -393,10 +417,14 @@ namespace AminHP.KimodoBridge
                 KimodoFK.GlobalPose(sk, PoseClip(t), 0, out _, out var grot2);
                 int endParent = sk.bones[iEnd].parent;
                 Quaternion parentG = endParent >= 0 ? grot2[endParent] : Quaternion.identity;
-                WriteQuat(t.localQuats, iEnd, Quaternion.Inverse(parentG) * keepEnd);
+                WriteQuat(t.localQuats, iEnd, KimodoFK.Inv(parentG) * keepEnd);
             }
             return true;
         }
+
+        private static bool IsFinite(Vector3 v) =>
+            !float.IsNaN(v.x) && !float.IsNaN(v.y) && !float.IsNaN(v.z) &&
+            !float.IsInfinity(v.x) && !float.IsInfinity(v.y) && !float.IsInfinity(v.z);
 
         /// <summary>Set one joint's global rotation (Kimodo coords) in the key's pose.</summary>
         public bool SetJointGlobalRotation(Target t, int joint, Quaternion globalKimodo)
@@ -406,7 +434,7 @@ namespace AminHP.KimodoBridge
             KimodoFK.GlobalPose(sk, PoseClip(t), 0, out _, out var grot);
             int par = sk.bones[joint].parent;
             Quaternion parentG = par >= 0 ? grot[par] : Quaternion.identity;
-            WriteQuat(t.localQuats, joint, Quaternion.Inverse(parentG) * globalKimodo);
+            WriteQuat(t.localQuats, joint, KimodoFK.Inv(parentG) * globalKimodo);
             t.hasPose = true;
             return true;
         }
@@ -442,10 +470,30 @@ namespace AminHP.KimodoBridge
             return true;
         }
 
+        // Always store a UNIT rotation: FK scales a bone's offset by |q|², so an off-unit quaternion
+        // stretches the skeleton, and re-solving off that result compounds it (KimodoFK.Unit).
         private static void WriteQuat(float[] q, int joint, Quaternion v)
         {
+            v = KimodoFK.Unit(v);
             int i = joint * 4;
             q[i + 0] = v.w; q[i + 1] = v.x; q[i + 2] = v.y; q[i + 3] = v.z;
+        }
+
+        /// <summary>Renormalise every rotation in a pose, in place. Repairs poses saved by an earlier
+        /// build that let the drift accumulate, and keeps what BuildConstraints sends the server
+        /// unit-length.</summary>
+        private static void NormalizePose(float[] q)
+        {
+            if (q == null) return;
+            for (int i = 0; i + 3 < q.Length; i += 4)
+            {
+                float m2 = q[i] * q[i] + q[i + 1] * q[i + 1] + q[i + 2] * q[i + 2] + q[i + 3] * q[i + 3];
+                if (!(m2 > 1e-12f) || float.IsInfinity(m2))         // degenerate or non-finite -> identity
+                { q[i] = 1f; q[i + 1] = q[i + 2] = q[i + 3] = 0f; continue; }
+                if (Mathf.Abs(m2 - 1f) < 1e-9f) continue;
+                float inv = 1f / Mathf.Sqrt(m2);
+                q[i] *= inv; q[i + 1] *= inv; q[i + 2] *= inv; q[i + 3] *= inv;
+            }
         }
     }
 }

@@ -47,7 +47,7 @@ The server does **not** have to be on the machine running Unity — see
 https://github.com/Amin-HP/Kimodo-Unity.git?path=/Packages/com.aminhp.kimodobridge
 ```
 
-Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.7`.
+Append a tag to pin a version, e.g. `…com.aminhp.kimodobridge#v0.2.8`.
 
 Only the package is fetched; the Unity project in that repository is just where it is developed.
 
@@ -148,14 +148,18 @@ Add these from **Add Component** or the **GameObject ▸ Kimodo** menu:
 | Component | What it pins | Shown as |
 |---|---|---|
 | **KimodoWaypoints** | The ground path the pelvis travels through, and optionally the facing at each point. | A dot per waypoint with an arrow, plus the character's current path. |
-| **KimodoEndEffectors** | Hand / foot keyframes. A key is a whole-body pose of which only the limbs you tick (`LF` `RF` `LH` `RH`) — and the root — are pinned. Several limbs share **one key per frame**. | A ghost skeleton with the constrained joints in **red** and an axes gizmo on each hand/foot (its rotation is constrained too). |
-| **KimodoPoseConstraints** | Whole-body poses. Individual joints can be switched off so only part of the body is pinned. | A ghost skeleton, optionally with a transparent ghost of your model. |
+| **KimodoEndEffectors** | Hand / foot keyframes. A key is a whole-body pose of which only the limbs you tick (`LF` `RF` `LH` `RH`) — and the root — are pinned. Several limbs share **one key per frame**. | A ghost skeleton with the constrained joints in **red** and an axes gizmo on each hand/foot (its rotation is constrained too), plus a transparent ghost of your model. |
+| **KimodoPoseConstraints** | Whole-body poses. Individual joints can be switched off so only part of the body is pinned. | The same: a ghost skeleton plus a transparent ghost of your model. |
 
-Two per-key options worth knowing:
+Three per-key options worth knowing:
 
 - **Free root** (hand/foot keys) — leave the pose's height and facing free so the body can adapt to
   reach, instead of pinning it exactly where you posed it.
 - **Show** — hide an individual key's ghost when the Scene gets busy.
+- **Show ghost mesh** — the transparent model at each key's pose, **on by default** on both
+  components, with a transparency slider. It is what makes a key readable: a hand key fades the ghost
+  down to the arm it belongs to (a foot key, to the lower body), so you place the hand on an actual
+  arm rather than on a bare skeleton. Turn it off if the Scene gets crowded.
 
 ### The editing tools
 
@@ -266,6 +270,7 @@ client.Generate(
 | **Generate fails: connection refused** | The server is not running, or **Server URL** points somewhere else. For a remote server, check it was started with `--host 0.0.0.0` and that the firewall allows the port. |
 | **Everything is green but nothing works** | The connection is a health check, not a live socket. Press **Disconnect** then **Connect** to re-check. |
 | **A hand or foot ignores its target** | Constraints are soft. Raise **Constraint weight**, describe the same action in the prompt, and make sure the target is reachable — a dotted line means the limb cannot get there from that pose. |
+| **A dragged arm or leg stretches longer and longer, and the move gizmo grows with it** | Fixed in **v0.2.8**. Keys already authored repair themselves the next time they load; one that ended up badly mangled can be reseeded with **⋮ ▸ Align pose to frame** on the key. |
 | **The character walks on the spot / shoots across the scene** | Root bake mode and the Animator's **Apply Root Motion**; then **Root motion scale** on the generator. See [Baking](#7-baking-to-an-animationclip). |
 | **The preview vanished after a recompile** | It should be restored from the cache automatically. Check the cache line at the bottom of the generator; if it says nothing is cached, generate once more and save the scene. |
 | **No editing tools in the Scene view** | The **Kimodo Constraints** overlay is hidden — open the Scene view's overlay menu (⋮⋮ or `` ` ``) and tick it. |

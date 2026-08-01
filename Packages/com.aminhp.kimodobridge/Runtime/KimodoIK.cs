@@ -30,16 +30,41 @@ namespace AminHP.KimodoBridge
             float lUM = (pMid - pUp).magnitude;   // upper bone length
             float lME = (pEnd - pMid).magnitude;  // lower bone length
 
+            // Work from unit rotations and hand back unit rotations. Anything else compounds into a
+            // stretching skeleton once the caller re-solves off its own output — see KimodoFK.Unit.
+            gUp = KimodoFK.Unit(gUp);
+            gMid = KimodoFK.Unit(gMid);
+
+            // A zero-length bone has no direction to aim, and FromToRotation on a zero vector returns
+            // nonsense — leave the chain as it is rather than write that into the pose.
+            if (lUM < 1e-6f || lME < 1e-6f)
+                return new Result
+                {
+                    localUpper = KimodoFK.Inv(parentGlobalUp) * gUp,
+                    localMid = KimodoFK.Inv(gUp) * gMid,
+                    endReached = pEnd,
+                };
+
             Vector3 toT = target - pUp;
             float c0 = toT.magnitude;
             float maxReach = (lUM + lME) * 0.999f;
             float minReach = Mathf.Abs(lUM - lME) + 1e-4f;
             float c = Mathf.Clamp(c0, minReach, maxReach);
-            Vector3 axis = c0 > 1e-6f ? toT.normalized : (pEnd - pUp).normalized;
+            // Fully folded (end sitting on top of the upper joint) leaves no axis to keep, so fall
+            // back to the upper bone's own direction, which a real bone always has.
+            Vector3 axis = c0 > 1e-6f ? toT.normalized
+                         : ((pEnd - pUp).sqrMagnitude > 1e-8f ? (pEnd - pUp).normalized
+                                                             : (pMid - pUp).normalized);
 
-            // Knee/elbow bend direction (pole): keep the current bend plane.
-            Vector3 curAxis = (pEnd - pUp).sqrMagnitude > 1e-8f ? (pEnd - pUp).normalized : axis;
-            Vector3 bendDir = (pMid - pUp) - Vector3.Dot(pMid - pUp, curAxis) * curAxis;
+            // Knee/elbow bend direction (pole): the current bend, flattened onto the plane
+            // perpendicular to the NEW axis. It must be perpendicular to THAT axis, not to the old
+            // upper->end one: h and r below are the two legs of a right triangle on the new axis, so a
+            // bendDir that still leans along it makes |pMidNew - pUp| come out longer than the upper
+            // bone. FK then keeps the real bone length and the aim lands the hand short of the target,
+            // so the next mouse-move solved from an already-wrong pose — the limb bending off in its
+            // own direction instead of following the handle.
+            Vector3 upToMid = pMid - pUp;
+            Vector3 bendDir = upToMid - Vector3.Dot(upToMid, axis) * axis;
             if (bendDir.sqrMagnitude < 1e-8f)
             {
                 bendDir = Vector3.Cross(axis, Vector3.up);
@@ -54,14 +79,14 @@ namespace AminHP.KimodoBridge
 
             // Aim rotations (world, minimal-twist) applied to the current global rotations.
             Quaternion dUp = Quaternion.FromToRotation((pMid - pUp).normalized, (pMidNew - pUp).normalized);
-            Quaternion gUpNew = dUp * gUp;
+            Quaternion gUpNew = KimodoFK.Unit(dUp * gUp);
             Quaternion dMid = Quaternion.FromToRotation((pEnd - pMid).normalized, (pEndNew - pMidNew).normalized);
-            Quaternion gMidNew = dMid * gMid;
+            Quaternion gMidNew = KimodoFK.Unit(dMid * gMid);
 
             return new Result
             {
-                localUpper = Quaternion.Inverse(parentGlobalUp) * gUpNew,
-                localMid = Quaternion.Inverse(gUpNew) * gMidNew,
+                localUpper = KimodoFK.Unit(KimodoFK.Inv(parentGlobalUp) * gUpNew),
+                localMid = KimodoFK.Unit(KimodoFK.Inv(gUpNew) * gMidNew),
                 endReached = pEndNew,
             };
         }
